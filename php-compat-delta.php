@@ -17,7 +17,10 @@ if ( ! defined( 'ABSPATH' ) ) {
  * Also stores a summary next to each plugin on the plugins list page.
  */
 class PCD_Plugin {
-	const OPT_LAST_SCAN = 'pcd_last_scan_results';
+	const OPT_LAST_SCAN        = 'pcd_last_scan_results';
+	const TRANSIENT_PREFIX     = 'pcd_job_';
+	const JOB_TTL              = 21600; // 6 hours
+	const PER_PLUGIN_MSG_LIMIT = 300; // cap stored messages per plugin for stability
 
 	/**
      * Hook WordPress actions/filters for the plugin lifecycle.
@@ -34,6 +37,10 @@ class PCD_Plugin {
 		add_action( 'admin_enqueue_scripts', [ __CLASS__, 'enqueue_assets' ] );
 		add_filter( 'plugin_row_meta', [ __CLASS__, 'plugin_row_meta_note' ], 10, 2 );
 		add_action( 'wp_ajax_pcd_scan', [ __CLASS__, 'ajax_scan' ] );
+		// Async job endpoints and cron runner.
+		add_action( 'wp_ajax_pcd_scan_start', [ __CLASS__, 'ajax_scan_start' ] );
+		add_action( 'wp_ajax_pcd_scan_status', [ __CLASS__, 'ajax_scan_status' ] );
+		add_action( 'pcd_run_scan', [ __CLASS__, 'cron_run_scan' ], 10, 1 );
 	}
 
 	/**
@@ -163,8 +170,7 @@ class PCD_Plugin {
 		$local = plugin_dir_path( __FILE__ ) . 'vendor/bin/phpcs';
 		if ( file_exists( $local ) && is_executable( $local ) ) {
 			return $local; }
-		$root = ABSPATH . 'vendor/bin/phpcs';
-		return $root;
+        return ABSPATH . 'vendor/bin/phpcs';
 	}
 
 	/**
@@ -336,7 +342,7 @@ class PCD_Plugin {
  	private static function plugin_slug_from_path( string $path ): string {
 		$base = str_replace( '\\', '/', trailingslashit( WP_PLUGIN_DIR ) );
 		$norm = str_replace( '\\', '/', $path );
-		if ( 0 === strpos( $norm, $base ) ) {
+		if ( str_starts_with( $norm, $base ) ) {
 			$rel   = substr( $norm, strlen( $base ) );
 			$parts = explode( '/', $rel );
 			return $parts[0] ?? 'unknown';
@@ -362,16 +368,7 @@ class PCD_Plugin {
 		return $groups;
 	}
 
-	/**
-	 * Legacy inline CSS output (now replaced by enqueued assets).
-	 *
-	 * Kept for backward compatibility; does nothing now.
-	 */
-	public static function admin_head_css(): void {
-		// No-op. Styles are enqueued via enqueue_assets().
-	}
-
-	/**
+    /**
 	 * Conditionally enqueue admin scripts and styles for this plugin.
 	 *
 	 * - Enqueue CSS on the Tools page and Plugins list (for badges).
@@ -399,6 +396,15 @@ class PCD_Plugin {
 		// Enqueue JS only on the Tools page.
 		if ( 'tools_page_php-compat-delta' === $hook ) {
 			wp_enqueue_script( 'pcd-admin', $assets_base_url . $js_rel, [ 'jquery' ], $js_ver, true );
+			// Provide polling configuration.
+			wp_localize_script(
+                'pcd-admin',
+                'pcdAjax',
+                [
+					'ajaxUrl'      => admin_url( 'admin-ajax.php' ),
+					'pollInterval' => 3000,
+				]
+                );
 		}
 	}
 
@@ -484,7 +490,7 @@ class PCD_Plugin {
 		}
 		echo '</select></td></tr>';
 
-		echo '<tr><th><label for="pcd_include_warnings">Include warnings</label></th><td><label><input type="checkbox" id="pcd_include_warnings" name="pcd_include_warnings" value="1"' . checked( (bool) $include_warnings, true, false ) . '> Include warnings</label></td></tr>';
+		echo '<tr><th><label for="pcd_include_warnings">Include warnings</label></th><td><label><input type="checkbox" id="pcd_include_warnings" name="pcd_include_warnings" value="1"' . checked( $include_warnings, true, false ) . '> Include warnings</label></td></tr>';
 
 		echo '<tr><th>Plugins</th><td>';
 		echo '<label><input type="checkbox" name="pcd_scan_all" value="1"' . checked( $scan_all, true, false ) . '> Scan all plugins</label>';
@@ -492,12 +498,12 @@ class PCD_Plugin {
 		echo '<div class="pcd-plugin-list">';
 		foreach ( $all_plugins as $slug ) {
 			$is_checked = in_array( $slug, $sel_plugins, true );
-			echo '<label style="display:block"><input type="checkbox" name="pcd_plugins[]" value="' . esc_attr( $slug ) . '"' . checked( (bool) $is_checked, true, false ) . '> ' . esc_html( (string) $slug ) . '</label>';
+			echo '<label style="display:block"><input type="checkbox" name="pcd_plugins[]" value="' . esc_attr( $slug ) . '"' . checked( $is_checked, true, false ) . '> ' . esc_html( $slug ) . '</label>';
 		}
 		echo '</div>';
 		echo '</td></tr>';
 
-		echo '<tr><th><label for="pcd_extra_excludes">Extra excludes</label></th><td><input type="text" id="pcd_extra_excludes" name="pcd_extra_excludes" value="' . esc_attr( (string) $extra_excludes_raw ) . '" class="regular-text"> <span class="description">Comma-separated sniff codes to exclude if a scan fails.</span></td></tr>';
+		echo '<tr><th><label for="pcd_extra_excludes">Extra excludes</label></th><td><input type="text" id="pcd_extra_excludes" name="pcd_extra_excludes" value="' . esc_attr( $extra_excludes_raw ) . '" class="regular-text"> <span class="description">Comma-separated sniff codes to exclude if a scan fails.</span></td></tr>';
 		echo '</tbody></table>';
 		echo '<p><button type="submit" class="button button-primary">Run scan</button></p>';
 		echo '</form>';
@@ -545,7 +551,7 @@ class PCD_Plugin {
 		if ( 0 !== $code1 ) {
 			$html .= '<div class="notice notice-error"><p>Baseline scan failed (PHP ' . self::h( $runtime ) . ').</p>';
 			$html .= '<p><strong>Command:</strong> <code>' . self::h( $cmd1 ) . '</code></p>';
-			$html .= '<pre style="white-space:pre-wrap">' . self::h( $err1 ? $err1 : $json1 ) . '</pre>';
+			$html .= '<pre style="white-space:pre-wrap">' . self::h( $err1 ?: $json1 ) . '</pre>';
 			$html .= '<p>Try adding the failing sniff(s) to Extra excludes above and rerun.</p></div>';
 			return $html;
 		}
@@ -559,7 +565,7 @@ class PCD_Plugin {
 		if ( 0 !== $code2 ) {
 			$html .= '<div class="notice notice-error"><p>Target scan failed (PHP ' . self::h( $selected_target ) . ').</p>';
 			$html .= '<p><strong>Command:</strong> <code>' . self::h( $cmd2 ) . '</code></p>';
-			$html .= '<pre style="white-space:pre-wrap">' . self::h( $err2 ? $err2 : $json2 ) . '</pre>';
+			$html .= '<pre style="white-space:pre-wrap">' . self::h( $err2 ?: $json2 ) . '</pre>';
 			$html .= '<p>Try adding the failing sniff(s) to Extra excludes above and rerun.</p></div>';
 			return $html;
 		}
@@ -607,7 +613,7 @@ class PCD_Plugin {
 				$type  = isset( $m['type'] ) ? (string) $m['type'] : '';
 				$msg   = isset( $m['message'] ) ? (string) $m['message'] : '';
 				$src   = isset( $m['source'] ) ? (string) $m['source'] : '';
-				$html .= '<tr class="' . self::h( $type ) . '"><td>' . self::h( preg_replace( '#^.*/wp-content/plugins/#', '', $file ) ) . '</td><td>' . (int) $line . '</td><td>' . (int) $col . '</td><td><strong>' . self::h( $type ) . '</strong></td><td>' . self::h( $msg ) . '</td><td><code>' . self::h( $src ) . '</code></td></tr>';
+				$html .= '<tr class="' . self::h( $type ) . '"><td>' . self::h( preg_replace( '#^.*/wp-content/plugins/#', '', $file ) ) . '</td><td>' . $line . '</td><td>' . $col . '</td><td><strong>' . self::h( $type ) . '</strong></td><td>' . self::h( $msg ) . '</td><td><code>' . self::h( $src ) . '</code></td></tr>';
 			}
 			$html .= '</tbody></table>';
 		}
@@ -647,7 +653,7 @@ class PCD_Plugin {
 			'extra_excludes'   => $extra_excludes,
 		]       = $parsed;
 
-		if ( version_compare( (string) $selected_target, (string) $runtime, '<=' ) ) {
+		if ( version_compare( $selected_target, $runtime, '<=' ) ) {
 			wp_send_json_error( [ 'message' => 'Target PHP must be greater than runtime PHP ' . self::h( $runtime ) . '.' ] );
 		}
 
@@ -656,8 +662,300 @@ class PCD_Plugin {
 			wp_send_json_error( [ 'message' => 'No plugins selected. Please choose plugins or enable "Scan all plugins".' ] );
 		}
 
-		$html = self::generate_results_html( $runtime, $selected_target, (bool) $include_warnings, (array) $plugins, (array) $extra_excludes );
+		$html = self::generate_results_html( $runtime, $selected_target, $include_warnings, $plugins, $extra_excludes );
 		wp_send_json_success( [ 'html' => $html ] );
+	}
+
+	/**
+	 * Generate a UUID-like job ID.
+	 *
+	 * @return string Job ID.
+	 */
+	private static function new_job_id(): string {
+		if ( function_exists( 'wp_generate_uuid4' ) ) {
+			return wp_generate_uuid4();
+		}
+		return substr( md5( wp_rand() . '|' . microtime( true ) ), 0, 12 );
+	}
+
+	/**
+	 * Load a job array from transient storage.
+	 *
+	 * @param string $job_id Job ID.
+	 * @return array Job data or empty array if not found.
+	 */
+	private static function get_job( string $job_id ): array {
+		$tid  = self::TRANSIENT_PREFIX . preg_replace( '/[^a-zA-Z0-9_\-]/', '', $job_id );
+		$data = get_transient( $tid );
+		return is_array( $data ) ? $data : [];
+	}
+
+	/**
+	 * Persist a job array to transient storage.
+	 *
+	 * @param array $job Job data.
+	 * @return void
+	 */
+	private static function save_job( array $job ): void {
+		$job_id = isset( $job['id'] ) ? (string) $job['id'] : '';
+		if ( '' === $job_id ) {
+			return;
+		}
+		$tid = self::TRANSIENT_PREFIX . preg_replace( '/[^a-zA-Z0-9_\-]/', '', $job_id );
+		set_transient( $tid, $job, self::JOB_TTL );
+	}
+
+	/**
+	 * AJAX: Start a scan job asynchronously.
+	 *
+	 * Creates a job, schedules the first cron tick, and returns the job_id immediately.
+	 *
+	 * @return void
+	 */
+	public static function ajax_scan_start(): void {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( [ 'message' => 'Insufficient permissions.' ] );
+		}
+		check_ajax_referer( 'pcd', 'pcd_nonce' );
+
+		$runtime     = self::get_runtime_major_minor();
+		$all_plugins = self::list_plugins();
+
+		$parsed = self::parse_request( $_POST ); // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified via check_ajax_referer.
+		[
+			'target'             => $selected_target,
+			'include_warnings'   => $include_warnings,
+			'scan_all'           => $scan_all,
+			'plugins'            => $sel_plugins,
+			'extra_excludes'     => $extra_excludes,
+		]       = $parsed;
+
+		if ( version_compare( $selected_target, $runtime, '<=' ) ) {
+			wp_send_json_error( [ 'message' => 'Target PHP must be greater than runtime PHP ' . self::h( $runtime ) . '.' ] );
+		}
+
+		$plugins = $scan_all ? $all_plugins : $sel_plugins;
+		if ( empty( $plugins ) ) {
+			wp_send_json_error( [ 'message' => 'No plugins selected. Please choose plugins or enable "Scan all plugins".' ] );
+		}
+
+		// Validate requested plugins exist.
+		$plugins = array_values( array_intersect( array_map( 'strval', $plugins ), $all_plugins ) );
+		if ( empty( $plugins ) ) {
+			wp_send_json_error( [ 'message' => 'Selected plugins not found.' ] );
+		}
+
+		$job_id = self::new_job_id();
+		$job    = [
+			'id'               => $job_id,
+			'created'          => time(),
+			'updated'          => time(),
+			'status'           => 'queued',
+			'message'          => 'Queued',
+			'progress'         => 0,
+			'runtime'          => $runtime,
+			'target'           => $selected_target,
+			'include_warnings' => $include_warnings,
+			'plugins'          => array_values( $plugins ),
+			'extra_excludes'   => $extra_excludes,
+			'current_index'    => 0,
+			'per_plugin'       => [],
+			'final_html'       => '',
+		];
+		self::save_job( $job );
+
+		// Schedule first tick right away.
+		wp_schedule_single_event( time(), 'pcd_run_scan', [ $job_id ] );
+
+		wp_send_json_success( [ 'job_id' => $job_id ] );
+	}
+
+	/**
+	 * AJAX: Get job status for polling.
+	 *
+	 * @return void
+	 */
+	public static function ajax_scan_status(): void {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( [ 'message' => 'Insufficient permissions.' ] );
+		}
+		check_ajax_referer( 'pcd', 'pcd_nonce' );
+
+		$job_id = isset( $_POST['job_id'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['job_id'] ) ) : '';// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified via check_ajax_referer.
+		if ( '' === $job_id ) {
+			wp_send_json_error( [ 'message' => 'Missing job_id.' ] );
+		}
+		$job = self::get_job( $job_id );
+		if ( empty( $job ) ) {
+			wp_send_json_error( [ 'message' => 'Job not found or expired.' ] );
+		}
+
+		$data = [
+			'status'   => isset( $job['status'] ) ? (string) $job['status'] : 'unknown',
+			'progress' => isset( $job['progress'] ) ? (int) $job['progress'] : 0,
+			'message'  => isset( $job['message'] ) ? (string) $job['message'] : '',
+		];
+		if ( 'done' === $data['status'] ) {
+			$data['html'] = isset( $job['final_html'] ) ? (string) $job['final_html'] : '';
+		}
+		if ( 'error' === $data['status'] && empty( $data['message'] ) ) {
+			$data['message'] = 'Scan failed.';
+		}
+		wp_send_json_success( $data );
+	}
+
+	/**
+	 * Cron runner: process one plugin per invocation and reschedule until complete.
+	 *
+	 * @param string $job_id Job ID.
+	 * @return void
+	 */
+	public static function cron_run_scan( string $job_id ): void {
+		$job_id = sanitize_text_field( $job_id );
+		$job    = self::get_job( $job_id );
+		if ( empty( $job ) ) {
+			return;
+		}
+
+		$plugins = isset( $job['plugins'] ) && is_array( $job['plugins'] ) ? $job['plugins'] : [];
+		$total   = count( $plugins );
+		$idx     = isset( $job['current_index'] ) ? (int) $job['current_index'] : 0;
+		if ( 0 === $total ) {
+			$job['status']  = 'error';
+			$job['message'] = 'No plugins to scan.';
+			$job['updated'] = time();
+			self::save_job( $job );
+			return;
+		}
+
+		$job['status']  = 'running';
+		$job['updated'] = time();
+		self::save_job( $job );
+
+		if ( $total > $idx ) {
+			$slug     = (string) $plugins[ $idx ];
+			$runtime  = isset( $job['runtime'] ) ? (string) $job['runtime'] : self::get_runtime_major_minor();
+			$target   = isset( $job['target'] ) ? (string) $job['target'] : '';
+			$warn     = ! empty( $job['include_warnings'] );
+			$excludes = isset( $job['extra_excludes'] ) && is_array( $job['extra_excludes'] ) ? $job['extra_excludes'] : [];
+
+			// Run baseline then target scans for this plugin.
+			list(, $json1,) = self::phpcs_scan( $runtime, $warn, [ $slug ], $excludes );
+			list(, $json2,) = self::phpcs_scan( $target, $warn, [ $slug ], $excludes );
+
+			$messages = [];
+			$ok1      = is_string( $json1 ) && '' !== $json1;
+			$ok2      = is_string( $json2 ) && '' !== $json2;
+			$report1  = $ok1 ? json_decode( $json1, true ) : null;
+			$report2  = $ok2 ? json_decode( $json2, true ) : null;
+			if ( is_array( $report1 ) && is_array( $report2 ) ) {
+				$delta = self::compute_delta( $report1, $report2 );
+				// Cap stored messages for stability.
+				if ( count( $delta ) > self::PER_PLUGIN_MSG_LIMIT ) {
+					$delta = array_slice( $delta, 0, self::PER_PLUGIN_MSG_LIMIT );
+				}
+				$messages = $delta;
+			} else {
+				$job['per_plugin'][ $slug ] = [ 'error' => 'Failed to parse JSON output for ' . $slug . '.' ];
+			}
+
+			if ( ! isset( $job['per_plugin'][ $slug ] ) ) {
+				$job['per_plugin'][ $slug ] = [
+					'issues'   => count( $messages ),
+					'messages' => $messages,
+				];
+			}
+
+			++$idx;
+			$job['current_index'] = $idx;
+			$job['progress']      = (int) floor( ( $idx / $total ) * 100 );
+			$job['message']       = 'Processed ' . $idx . ' / ' . $total . ' plugins…';
+			$job['updated']       = time();
+			self::save_job( $job );
+		}
+
+		if ( $idx < $total ) {
+			// Schedule the next plugin scan.
+			wp_schedule_single_event( time() + 1, 'pcd_run_scan', [ $job_id ] );
+			return;
+		}
+
+		// Done. Build final HTML and persist summary for plugin badges.
+		$groups  = [];
+		$results = [];
+		foreach ( $plugins as $slug2 ) {
+			$entry             = $job['per_plugin'][ $slug2 ] ?? [];
+			$count             = isset( $entry['issues'] ) ? (int) $entry['issues'] : 0;
+			$results[ $slug2 ] = [ 'issues' => $count ];
+			if ( 0 < $count && isset( $entry['messages'] ) && is_array( $entry['messages'] ) ) {
+				$groups[ $slug2 ] = $entry['messages'];
+			}
+		}
+
+		update_option(
+			self::OPT_LAST_SCAN,
+			[
+				'runtime' => (string) $job['runtime'],
+				'target'  => (string) $job['target'],
+				'results' => $results,
+			],
+			false
+		);
+
+		$job['final_html'] = self::build_final_html_from_groups( (string) $job['runtime'], (string) $job['target'], $plugins, $groups );
+		$job['status']     = 'done';
+		$job['message']    = 'Completed.';
+		$job['progress']   = 100;
+		$job['updated']    = time();
+		self::save_job( $job );
+	}
+
+	/**
+	 * Build final results HTML using stored per-plugin message groups.
+	 *
+	 * @param string              $runtime         Runtime PHP version.
+	 * @param string              $selected_target Target PHP version.
+	 * @param array<int,string>   $plugins         Plugin slugs.
+	 * @param array<string,array> $groups          Messages grouped by plugin.
+	 * @return string HTML.
+	 */
+	private static function build_final_html_from_groups( string $runtime, string $selected_target, array $plugins, array $groups ): string {
+        $html  = '<hr />';
+		$html .= '<h2>Results: Baseline ' . self::h( $runtime ) . ' → Target ' . self::h( $selected_target ) . '</h2>';
+
+		if ( empty( $groups ) ) {
+			$html .= '<div class="notice notice-success"><p>All selected plugins show no new issues for PHP ' . self::h( $selected_target ) . ' compared to ' . self::h( $runtime ) . '. Compatible.</p></div>';
+			return $html;
+		}
+
+		foreach ( $groups as $slug => $msgs ) {
+			$count = is_array( $msgs ) ? count( $msgs ) : 0;
+			$html .= '<h3 id="plugin-' . self::h( (string) $slug ) . '">' . self::h( (string) $slug ) . '</h3>';
+			$html .= '<p class="pcd-summary--bad">Not compatible with PHP ' . self::h( $selected_target ) . ' (new issues: ' . (int) $count . '). Consider contacting the developer or finding a replacement.</p>';
+			$html .= '<table class="widefat fixed striped"><thead><tr><th>File</th><th>Line</th><th>Col</th><th>Type</th><th>Message</th><th>Source</th></tr></thead><tbody>';
+			foreach ( $msgs as $m ) {
+				$file  = isset( $m['path'] ) ? (string) $m['path'] : '';
+				$line  = isset( $m['line'] ) ? (int) $m['line'] : 0;
+				$col   = isset( $m['column'] ) ? (int) $m['column'] : 0;
+				$type  = isset( $m['type'] ) ? (string) $m['type'] : '';
+				$msg   = isset( $m['message'] ) ? (string) $m['message'] : '';
+				$src   = isset( $m['source'] ) ? (string) $m['source'] : '';
+				$html .= '<tr class="' . self::h( $type ) . '"><td>' . self::h( preg_replace( '#^.*/wp-content/plugins/#', '', $file ) ) . '</td><td>' . $line . '</td><td>' . $col . '</td><td><strong>' . self::h( $type ) . '</strong></td><td>' . self::h( $msg ) . '</td><td><code>' . self::h( $src ) . '</code></td></tr>';
+			}
+			$html .= '</tbody></table>';
+		}
+
+		$incompatible = array_keys( $groups );
+		$compatible   = array_values( array_diff( $plugins, $incompatible ) );
+		if ( ! empty( $compatible ) ) {
+			$html .= '<h2>Compatible plugins</h2><ul class="ul-disc">';
+			foreach ( $compatible as $slug2 ) {
+				$html .= '<li><strong>' . self::h( (string) $slug2 ) . '</strong>: <span class="pcd-summary--ok">Compatible with PHP ' . self::h( $selected_target ) . ' (no new issues)</span></li>';
+			}
+			$html .= '</ul>';
+		}
+
+		return $html;
 	}
 }
 
