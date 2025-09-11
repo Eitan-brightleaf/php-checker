@@ -1,0 +1,43 @@
+{
+  "require-dev": {
+    "squizlabs/php_codesniffer": "^3.9",
+    "phpcompatibility/php-compatibility": "^9.3",
+    "phpcompatibility/phpcompatibility-wp": "^2.1",
+    "wp-coding-standards/wpcs": "^3.0"
+  },
+  "extra": {
+    "strauss": {
+      "target_directory": "vendor/PCD",
+      "namespace_prefix": "PCD\\",
+      "classmap_prefix": "PCD_",
+      "constant_prefix": "PCD_",
+      "packages": [
+        "squizlabs/php_codesniffer",
+        "phpcompatibility/php-compatibility",
+        "phpcompatibility/phpcompatibility-wp",
+        "wp-coding-standards/wpcs"
+      ],
+      "exclude_packages": [],
+      "delete_vendor_packages": []
+    }
+  },
+  "scripts": {
+    "prefix-namespaces": [
+      "@php -r \"if (!file_exists('bin')) { mkdir('bin', 0755, true); }\"",
+      "@php -r \"if (!file_exists('bin/strauss.phar')) { file_put_contents('bin/strauss.phar', file_get_contents('https://github.com/BrianHenryIE/strauss/releases/download/0.21.1/strauss.phar')); }\"",
+      "@php bin/strauss.phar",
+      "@composer dump-autoload"
+    ],
+    "post-install-cmd": [
+      "@prefix-namespaces"
+    ],
+    "post-update-cmd": [
+      "@prefix-namespaces"
+    ]
+  },
+  "config": {
+    "allow-plugins": {
+      "dealerdirect/phpcodesniffer-composer-installer": true
+    }
+  }
+}
