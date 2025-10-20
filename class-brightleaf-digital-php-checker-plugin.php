@@ -1,6 +1,6 @@
 <?php
 /**
- * Plugin Name: PHP Plugin and Theme Compatibility Checker
+ * Plugin Name: PHP Compatibility Scanner
  * Author URI: https://digital.brightleaf.info/
  * Description: Scan WordPress plugins for PHP compatibility issues between current PHP and newer versions. Shows inline results and stores scan summaries.
  * Version: 1.0.0
@@ -16,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
- * Main plugin class for PHP Compatibility Checker.
+ * Main plugin class for PHP Compatibility Scanner.
  *
  * Provides an admin Tools page to scan installed plugins for new PHPCompatibility
  * issues between the current runtime PHP version and a chosen target PHP version.
@@ -60,7 +60,7 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 	}
 
 	/**
-     * Register the Tools page under Tools > PHP Compatibility Checker.
+     * Register the Tools page under Tools > PHP Compatibility Scanner.
      *
      * Checks user capability before registering the page.
      */
@@ -69,8 +69,8 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 			return;
 		}
 		add_management_page(
-			'PHP Compatibility Checker',
-			'PHP Compatibility Checker',
+			'PHP Compatibility Scanner',
+			'PHP Compatibility Scanner',
 			'manage_options',
 			'php-compat-delta',
 			[ __CLASS__, 'render_page' ]
@@ -595,7 +595,7 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 		);
 
 		echo '<div class="wrap brightleaf-digital-php-checker-wrap">';
-		echo '<h1>PHP Compatibility Checker</h1>';
+		echo '<h1>PHP Compatibility Scanner</h1>';
 		echo '<p class="brightleaf-digital-php-checker-meta">Baseline: <code>' . esc_html( $runtime ) . '</code> (current runtime). Choose one target to compare against.</p>';
 
 		echo '<form id="brightleaf-digital-php-checker-form" method="post">';

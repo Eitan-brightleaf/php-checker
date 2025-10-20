@@ -1,4 +1,4 @@
-=== PHP Plugin and Theme Compatibility Checker ===
+=== PHP Compatibility Scanner ===
 Contributors: eitanatbrightleaf
 Tags: php, compatibility, plugins, themes, scan
 Tested up to: 6.8
@@ -11,7 +11,7 @@ This plugin scans your installed plugins and themes for potential PHP compatibil
 
 == Description ==
 
-PHP Plugin and Theme Compatibility Checker helps you assess whether your site’s code (plugins and themes) is likely to run on newer versions of PHP. It performs static analysis using PHP_CodeSniffer and the PHPCompatibilityWP ruleset to flag code patterns that are incompatible with the selected target PHP version.
+PHP Compatibility Scanner helps you assess whether your site’s code (plugins and themes) is likely to run on newer versions of PHP. It performs static analysis using PHP_CodeSniffer and the PHPCompatibilityWP ruleset to flag code patterns that are incompatible with the selected target PHP version.
 
 What the plugin does (at a glance):
 - Compares your current runtime PHP (baseline) to a selected target PHP version (8.0–8.4).
