@@ -20,11 +20,17 @@
       "@php bin/strauss.phar",
       "@composer dump-autoload"
     ],
+    "cleanup-vendor": [
+      "@php -r \"\\$files = array('vendor/squizlabs/php_codesniffer/tests/EndToEnd/phpcs_test.sh','vendor/squizlabs/php_codesniffer/tests/EndToEnd/phpcbf_test.sh'); foreach (\\$files as \\$f) { if (file_exists(\\$f)) { @unlink(\\$f); } }\"",
+      "@php -r \"function rr(\\$d,\\$exts){\\$it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator(\\$d,FilesystemIterator::SKIP_DOTS));foreach(\\$it as \\$fi){if(\\$fi->isFile()){ \\$n=\\$fi->getFilename(); foreach(\\$exts as \\$e){ if (substr(\\$n,-strlen(\\$e))===\\$e){ @unlink(\\$fi->getPathname()); } } } }} rr('vendor',array('.sh','.bat','.cmd','.ps1'));\""
+    ],
     "post-install-cmd": [
-      "@prefix-namespaces"
+      "@prefix-namespaces",
+      "@cleanup-vendor"
     ],
     "post-update-cmd": [
-      "@prefix-namespaces"
+      "@prefix-namespaces",
+      "@cleanup-vendor"
     ]
   },
   "config": {

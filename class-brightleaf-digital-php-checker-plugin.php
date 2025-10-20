@@ -1,6 +1,6 @@
 <?php
 /**
- * Plugin Name: PHP Compatibility Checker
+ * Plugin Name: PHP Plugin and Theme Compatibility Checker
  * Author URI: https://digital.brightleaf.info/
  * Description: Scan WordPress plugins for PHP compatibility issues between current PHP and newer versions. Shows inline results and stores scan summaries.
  * Version: 1.0.0
