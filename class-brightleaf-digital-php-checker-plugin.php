@@ -9,6 +9,8 @@
  * Requires PHP: 7.4
  */
 
+use PHP_CodeSniffer\Runner;
+
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
@@ -44,7 +46,8 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 		// Async job endpoints and cron runner.
 		add_action( 'wp_ajax_brightleaf_digital_php_checker_scan_start', [ __CLASS__, 'ajax_scan_start' ] );
 		add_action( 'wp_ajax_brightleaf_digital_php_checker_scan_status', [ __CLASS__, 'ajax_scan_status' ] );
-		add_action( 'brightleaf_digital_php_checker_run_scan', [ __CLASS__, 'cron_run_scan' ], 10, 1 );
+		add_action( 'wp_ajax_brightleaf_digital_php_checker_scan_cancel', [ __CLASS__, 'ajax_scan_cancel' ] );
+		add_action( 'wp_ajax_brightleaf_digital_php_checker_scan_toggle_pause', [ __CLASS__, 'ajax_scan_toggle_pause' ] );
 	}
 
 	/**
@@ -122,16 +125,22 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 	private static function parse_request( array $src ): array {
 		$selected_target    = isset( $src['brightleaf_digital_php_checker_target'] ) ? preg_replace( '/[^0-9\.]+/', '', (string) wp_unslash( $src['brightleaf_digital_php_checker_target'] ) ) : '';
 		$include_warnings   = ! empty( $src['brightleaf_digital_php_checker_include_warnings'] );
-		$scan_all           = ! empty( $src['brightleaf_digital_php_checker_scan_all'] );
+		$scan_all_plugins   = ! empty( $src['brightleaf_digital_php_checker_scan_all'] );
 		$sel_plugins        = ( isset( $src['brightleaf_digital_php_checker_plugins'] ) && is_array( $src['brightleaf_digital_php_checker_plugins'] ) ) ? array_map( 'sanitize_text_field', wp_unslash( $src['brightleaf_digital_php_checker_plugins'] ) ) : [];
+		$themes_all         = ! empty( $src['brightleaf_digital_php_checker_themes_all'] );
+		$sel_themes         = ( isset( $src['brightleaf_digital_php_checker_themes'] ) && is_array( $src['brightleaf_digital_php_checker_themes'] ) ) ? array_map( 'sanitize_text_field', wp_unslash( $src['brightleaf_digital_php_checker_themes'] ) ) : [];
+		$scan_parent_child  = ! empty( $src['brightleaf_digital_php_checker_scan_parent_child'] );
 		$extra_excludes_raw = isset( $src['brightleaf_digital_php_checker_extra_excludes'] ) ? (string) wp_unslash( $src['brightleaf_digital_php_checker_extra_excludes'] ) : '';
 		$extra_excludes     = array_filter( array_map( 'trim', explode( ',', $extra_excludes_raw ) ) );
 
 		return [
 			'target'             => (string) $selected_target,
 			'include_warnings'   => $include_warnings,
-			'scan_all'           => $scan_all,
+			'scan_all'           => $scan_all_plugins,
 			'plugins'            => $sel_plugins,
+			'themes_all'         => $themes_all,
+			'themes'             => $sel_themes,
+			'scan_parent_child'  => $scan_parent_child,
 			'extra_excludes'     => $extra_excludes,
 			'extra_excludes_raw' => $extra_excludes_raw,
 		];
@@ -277,7 +286,104 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 			$paths[] = WP_PLUGIN_DIR . '/' . $slug; }
 		if ( empty( $paths ) ) {
 			$paths[] = WP_PLUGIN_DIR; }
-		return self::run_cmd( self::build_phpcs_cmd( $php_minor, $include_warnings, $paths, $extra_excludes ) );
+		return self::phpcs_scan_paths( $php_minor, $include_warnings, $paths, $extra_excludes );
+	}
+
+	/**
+	 * Run a PHPCompatibility scan via phpcs for arbitrary filesystem paths.
+	 * Prefer CLI if available; fall back to embedded runner.
+	 *
+	 * @param string $php_minor        Target PHP version (major.minor).
+	 * @param bool   $include_warnings Whether to include warnings.
+	 * @param array  $paths            Absolute paths to scan.
+	 * @param array  $extra_excludes   Extra sniff codes to exclude.
+	 * @return array{0:int,1:string,2:string,3:string}
+	 */
+	private static function phpcs_scan_paths( string $php_minor, bool $include_warnings, array $paths, array $extra_excludes ): array {
+		if ( self::cli_available() ) {
+			return self::run_cmd( self::build_phpcs_cmd( $php_minor, $include_warnings, $paths, $extra_excludes ) );
+		}
+		return self::run_phpcs_embedded( $php_minor, $include_warnings, $paths, $extra_excludes );
+	}
+
+	/**
+	 * Determine if CLI execution is available and phpcs binary exists.
+	 *
+	 * @return bool
+	 */
+	private static function cli_available(): bool {
+		$bin = self::find_phpcs_binary();
+		if ( ! file_exists( $bin ) ) {
+			return false;
+		}
+		$disabled      = ini_get( 'disable_functions' );
+		$disabled_list = is_string( $disabled ) && '' !== $disabled ? array_map( 'trim', explode( ',', $disabled ) ) : [];
+		$proc_ok       = function_exists( 'proc_open' ) && ! in_array( 'proc_open', $disabled_list, true );
+		$exec_ok       = function_exists( 'exec' ) && ! in_array( 'exec', $disabled_list, true );
+		return ( $proc_ok || $exec_ok );
+	}
+
+	/**
+	 * Embedded PHPCS runner without shell access.
+	 *
+	 * @param string $php_minor        Target PHP version (major.minor).
+	 * @param bool   $include_warnings Include warnings.
+	 * @param array  $paths            Paths to scan.
+	 * @param array  $extra_excludes   Extra excludes.
+	 * @return array{0:int,1:string,2:string,3:string}
+	 */
+	private static function run_phpcs_embedded( string $php_minor, bool $include_warnings, array $paths, array $extra_excludes ): array {
+		$json = '';
+		$err  = '';
+		$cmd  = 'embedded-phpcs';
+		try {
+			$report_file = wp_tempnam( 'phpcs-report' );
+			if ( ! $report_file ) {
+				return [ 1, '', 'Failed to create temp file for report.', $cmd ];
+			}
+			$args = [
+				'--report=json',
+				'--report-file=' . $report_file,
+				'--standard=PHPCompatibilityWP',
+				'--extensions=php',
+				'--runtime-set',
+				'testVersion',
+				$php_minor . '-' . $php_minor,
+			];
+			if ( ! $include_warnings ) {
+				$args[] = '--warning-severity=0';
+			}
+			if ( ! empty( $extra_excludes ) ) {
+				$args[] = '--exclude=' . implode( ',', array_unique( array_filter( $extra_excludes ) ) );
+			}
+			foreach ( $paths as $p ) {
+				$args[] = $p;
+			}
+			// Use PHPCS Runner with injected CLI args via $argv to avoid shell.
+			$argv_backup     = $GLOBALS['argv'] ?? null;
+			$_argv_backup    = isset( $_SERVER['argv'] ) ? sanitize_text_field( wp_unslash( $_SERVER['argv'] ) ) : null;
+			$argv            = array_merge( [ 'phpcs' ], $args );
+			$GLOBALS['argv'] = $argv;
+			$_SERVER['argv'] = $argv;
+			$runner          = new Runner();
+			$runner->runPHPCS();
+			// Restore argv globals.
+			if ( null !== $argv_backup ) {
+				$GLOBALS['argv'] = $argv_backup;
+			} else {
+				unset( $GLOBALS['argv'] ); }
+			if ( null !== $_argv_backup ) {
+				$_SERVER['argv'] = $_argv_backup;
+			} else {
+				unset( $_SERVER['argv'] ); }
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Reading local temp file, not remote URL
+			$json = is_readable( $report_file ) ? (string) file_get_contents( $report_file ) : '';
+			$code = 0;
+		} catch ( Throwable $e ) {
+			$err  = $e->getMessage();
+			$code = 1;
+		}
+		return [ $code, $json, $err, $cmd ];
 	}
 
 	/**
@@ -406,7 +512,7 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
                 'brightleaf_digital_php_checker_Ajax',
                 [
 					'ajaxUrl'      => admin_url( 'admin-ajax.php' ),
-					'pollInterval' => 3000,
+					'pollInterval' => 1000,
 				]
                 );
 		}
@@ -447,6 +553,7 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 		$runtime     = self::get_runtime_major_minor();
 		$targets     = self::get_available_targets();
 		$all_plugins = self::list_plugins();
+		$all_themes  = function_exists( 'wp_get_themes' ) ? wp_get_themes() : [];
 
 		// Verify nonce before processing any input.
       		$nonce_ok = isset( $_POST['brightleaf_digital_php_checker_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( (string) $_POST['brightleaf_digital_php_checker_nonce'] ) ), 'brightleaf_digital_php_checker' );
@@ -456,6 +563,9 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 		$include_warnings   = false;
 		$scan_all           = false;
 		$sel_plugins        = [];
+		$themes_all         = false;
+		$sel_themes         = [];
+		$scan_parent_child  = true; // Option enabled by default.
 		$extra_excludes     = [];
 		$extra_excludes_raw = '';
 
@@ -466,6 +576,9 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 				'include_warnings'   => $include_warnings,
 				'scan_all'           => $scan_all,
 				'plugins'            => $sel_plugins,
+				'themes_all'         => $themes_all,
+				'themes'             => $sel_themes,
+				'scan_parent_child'  => $scan_parent_child,
 				'extra_excludes'     => $extra_excludes,
 				'extra_excludes_raw' => $extra_excludes_raw,
 			]       = $parsed;
@@ -505,6 +618,34 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 			echo '<label style="display:block"><input type="checkbox" name="brightleaf_digital_php_checker_plugins[]" value="' . esc_attr( $slug ) . '"' . checked( $is_checked, true, false ) . '> ' . esc_html( $slug ) . '</label>';
 		}
 		echo '</div>';
+		echo '</td></tr>';
+
+		// Themes section.
+		echo '<tr><th>Themes</th><td>';
+		echo '<label><input type="checkbox" name="brightleaf_digital_php_checker_themes_all" value="1"' . checked( $themes_all, true, false ) . '> Scan all themes</label>';
+		echo '<p><em>Or select specific themes:</em></p>';
+		echo '<div class="brightleaf-digital-php-checker-plugin-list">';
+		if ( is_array( $all_themes ) && ! empty( $all_themes ) ) {
+			$active_theme      = wp_get_theme();
+			$active_stylesheet = $active_theme->get_stylesheet();
+			foreach ( $all_themes as $stylesheet => $theme_obj ) {
+				$name        = is_object( $theme_obj ) ? (string) $theme_obj->get( 'Name' ) : (string) $stylesheet;
+				$parent      = is_object( $theme_obj ) ? (string) $theme_obj->get( 'Template' ) : '';
+				$is_active   = ( $stylesheet === $active_stylesheet );
+				$label_extra = '';
+				if ( $is_active ) {
+					$label_extra .= ' <em>(active theme)</em>';
+				}
+				if ( $parent ) {
+					$label_extra .= ' <em>(child of ' . esc_html( $parent ) . ')</em>';
+				}
+				$is_checked = $themes_all || in_array( $stylesheet, $sel_themes, true );
+				// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- $label_extra is already escaped above
+				echo '<label style="display:block"><input type="checkbox" name="brightleaf_digital_php_checker_themes[]" value="' . esc_attr( (string) $stylesheet ) . '"' . checked( $is_checked, true, false ) . '> ' . esc_html( $name . ' (' . $stylesheet . ')' ) . $label_extra . '</label>';
+			}
+		}
+		echo '</div>';
+		echo '<p><label><input type="checkbox" name="brightleaf_digital_php_checker_scan_parent_child" value="1"' . checked( $scan_parent_child, true, false ) . '> Also scan parent when a child theme is selected</label></p>';
 		echo '</td></tr>';
 
 		echo '<tr><th><label for="brightleaf-digital-php-checker-extra-excludes">Extra excludes</label></th><td><input type="text" id="brightleaf-digital-php-checker-extra-excludes" name="brightleaf_digital_php_checker_extra_excludes" value="' . esc_attr( $extra_excludes_raw ) . '" class="regular-text"> <span class="description">Comma-separated sniff codes to exclude if a scan fails.</span></td></tr>';
@@ -724,6 +865,7 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 
 		$runtime     = self::get_runtime_major_minor();
 		$all_plugins = self::list_plugins();
+		$all_themes  = function_exists( 'wp_get_themes' ) ? wp_get_themes() : [];
 
 		$parsed = self::parse_request( $_POST ); // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified via check_ajax_referer.
 		[
@@ -731,6 +873,9 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 			'include_warnings'   => $include_warnings,
 			'scan_all'           => $scan_all,
 			'plugins'            => $sel_plugins,
+			'themes_all'         => $themes_all,
+			'themes'             => $sel_themes,
+			'scan_parent_child'  => $scan_parent_child,
 			'extra_excludes'     => $extra_excludes,
 		]       = $parsed;
 
@@ -739,14 +884,19 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 		}
 
 		$plugins = $scan_all ? $all_plugins : $sel_plugins;
-		if ( empty( $plugins ) ) {
-			wp_send_json_error( [ 'message' => 'No plugins selected. Please choose plugins or enable "Scan all plugins".' ] );
-		}
-
 		// Validate requested plugins exist.
 		$plugins = array_values( array_intersect( array_map( 'strval', $plugins ), $all_plugins ) );
-		if ( empty( $plugins ) ) {
-			wp_send_json_error( [ 'message' => 'Selected plugins not found.' ] );
+
+		// Build theme selection (show all by default if themes_all is true).
+		if ( $themes_all ) {
+			$themes_selected = array_map( 'strval', array_keys( $all_themes ) );
+		} else {
+			$themes_selected = array_values( array_intersect( array_map( 'strval', $sel_themes ), array_map( 'strval', array_keys( $all_themes ) ) ) );
+		}
+
+		$targets = self::build_targets( $plugins, $themes_selected, $scan_parent_child, $all_themes );
+		if ( empty( $targets ) ) {
+			wp_send_json_error( [ 'message' => 'No plugins or themes selected.' ] );
 		}
 
 		$job_id = self::new_job_id();
@@ -760,17 +910,18 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 			'runtime'          => $runtime,
 			'target'           => $selected_target,
 			'include_warnings' => $include_warnings,
-			'plugins'          => array_values( $plugins ),
+			'engine'           => self::cli_available() ? 'cli' : 'embedded',
+			'targets'          => $targets,
 			'extra_excludes'   => $extra_excludes,
 			'current_index'    => 0,
-			'per_plugin'       => [],
+			'per_target'       => [],
+			'cancel_requested' => false,
+			'paused'           => false,
 			'final_html'       => '',
 		];
 		self::save_job( $job );
 
-		// Schedule first tick right away.
-		wp_schedule_single_event( time(), 'brightleaf_digital_php_checker_run_scan', [ $job_id ] );
-
+		// No cron scheduling. Progress will be driven by AJAX polling ticks.
 		wp_send_json_success( [ 'job_id' => $job_id ] );
 	}
 
@@ -794,12 +945,18 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 			wp_send_json_error( [ 'message' => 'Job not found or expired.' ] );
 		}
 
+		// Drive work via AJAX tick when requested.
+		$tick = isset( $_POST['tick'] ) ? (int) $_POST['tick'] : 0; // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce already verified.
+		if ( 1 === $tick ) {
+			$job = self::process_next_item( $job_id );
+		}
+
 		$data = [
 			'status'   => isset( $job['status'] ) ? (string) $job['status'] : 'unknown',
 			'progress' => isset( $job['progress'] ) ? (int) $job['progress'] : 0,
 			'message'  => isset( $job['message'] ) ? (string) $job['message'] : '',
 		];
-		if ( 'done' === $data['status'] ) {
+		if ( 'done' === $data['status'] || 'cancelled' === $data['status'] ) {
 			$data['html'] = isset( $job['final_html'] ) ? (string) $job['final_html'] : '';
 		}
 		if ( 'error' === $data['status'] && empty( $data['message'] ) ) {
@@ -809,157 +966,296 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 	}
 
 	/**
-	 * Cron runner: process one plugin per invocation and reschedule until complete.
+     * Build scan targets from selected plugins and themes.
+     *
+     * @param array<int,string> $plugins           Plugin slugs.
+     * @param array<int,string> $themes_stylesheet Theme stylesheet slugs.
+     * @param bool              $include_parent    Include parent theme when child selected.
+     * @param array             $all_themes        Array from wp_get_themes().
+     * @return array<int,array{type:string,slug:string,path:string,label:string,key:string}>
+     */
+	private static function build_targets( array $plugins, array $themes_stylesheet, bool $include_parent, array $all_themes ): array {
+		$targets = [];
+		$added   = [];
+		foreach ( $plugins as $slug ) {
+			$path  = trailingslashit( WP_PLUGIN_DIR ) . $slug;
+			$key   = 'plugin:' . $slug;
+			$label = 'Plugin: ' . $slug;
+			if ( isset( $added[ $key ] ) ) {
+				continue; }
+			$targets[]     = [
+				'type'  => 'plugin',
+				'slug'  => $slug,
+				'path'  => $path,
+				'label' => $label,
+				'key'   => $key,
+			];
+			$added[ $key ] = true;
+		}
+		foreach ( $themes_stylesheet as $style ) {
+			if ( ! isset( $all_themes[ $style ] ) ) {
+				continue; }
+			$path  = trailingslashit( get_theme_root( $style ) ) . $style;
+			$key   = 'theme:' . $style;
+			$name  = is_object( $all_themes[ $style ] ) ? (string) $all_themes[ $style ]->get( 'Name' ) : $style;
+			$label = 'Theme: ' . $name . ' (' . $style . ')';
+			if ( ! isset( $added[ $key ] ) ) {
+				$targets[]     = [
+					'type'  => 'theme',
+					'slug'  => $style,
+					'path'  => $path,
+					'label' => $label,
+					'key'   => $key,
+				];
+				$added[ $key ] = true;
+			}
+			if ( $include_parent ) {
+				$parent = is_object( $all_themes[ $style ] ) ? (string) $all_themes[ $style ]->get( 'Template' ) : '';
+				if ( $parent && isset( $all_themes[ $parent ] ) ) {
+					$pkey = 'theme:' . $parent;
+					if ( ! isset( $added[ $pkey ] ) ) {
+						$ppath          = trailingslashit( get_theme_root( $parent ) ) . $parent;
+						$pname          = is_object( $all_themes[ $parent ] ) ? (string) $all_themes[ $parent ]->get( 'Name' ) : $parent;
+						$plabel         = 'Theme: ' . $pname . ' (' . $parent . ')';
+						$targets[]      = [
+							'type'  => 'theme',
+							'slug'  => $parent,
+							'path'  => $ppath,
+							'label' => $plabel,
+							'key'   => $pkey,
+						];
+						$added[ $pkey ] = true;
+					}
+				}
+			}
+		}
+		return $targets;
+	}
+
+	/**
+	 * Process one target step for the given job. Cooperative cancel/pause.
 	 *
 	 * @param string $job_id Job ID.
-	 * @return void
+	 * @return array Updated job data.
 	 */
-	public static function cron_run_scan( string $job_id ): void {
-		$job_id = sanitize_text_field( $job_id );
-		$job    = self::get_job( $job_id );
+	private static function process_next_item( string $job_id ): array {
+		$job = self::get_job( $job_id );
 		if ( empty( $job ) ) {
-			return;
+			return [];
 		}
-
-		$plugins = isset( $job['plugins'] ) && is_array( $job['plugins'] ) ? $job['plugins'] : [];
-		$total   = count( $plugins );
+		if ( ! empty( $job['cancel_requested'] ) ) {
+			$job['status']  = 'cancelled';
+			$job['message'] = 'Cancelled.';
+			$job['updated'] = time();
+			// Build partial HTML from what we have.
+			$targets           = isset( $job['targets'] ) && is_array( $job['targets'] ) ? $job['targets'] : [];
+			$per_target        = isset( $job['per_target'] ) && is_array( $job['per_target'] ) ? $job['per_target'] : [];
+			$job['final_html'] = self::build_final_html_from_targets( (string) $job['runtime'], (string) $job['target'], $targets, $per_target );
+			self::save_job( $job );
+			return $job;
+		}
+		if ( ! empty( $job['paused'] ) ) {
+			$job['status']  = 'paused';
+			$job['message'] = 'Paused.';
+			$job['updated'] = time();
+			self::save_job( $job );
+			return $job;
+		}
+		$targets = isset( $job['targets'] ) && is_array( $job['targets'] ) ? $job['targets'] : [];
+		$total   = count( $targets );
 		$idx     = isset( $job['current_index'] ) ? (int) $job['current_index'] : 0;
 		if ( 0 === $total ) {
 			$job['status']  = 'error';
-			$job['message'] = 'No plugins to scan.';
+			$job['message'] = 'No scan targets.';
 			$job['updated'] = time();
 			self::save_job( $job );
-			return;
+			return $job;
 		}
-
 		$job['status']  = 'running';
 		$job['updated'] = time();
 		self::save_job( $job );
-
-		if ( $total > $idx ) {
-			$slug     = (string) $plugins[ $idx ];
-			$runtime  = isset( $job['runtime'] ) ? (string) $job['runtime'] : self::get_runtime_major_minor();
-			$target   = isset( $job['target'] ) ? (string) $job['target'] : '';
-			$warn     = ! empty( $job['include_warnings'] );
-			$excludes = isset( $job['extra_excludes'] ) && is_array( $job['extra_excludes'] ) ? $job['extra_excludes'] : [];
-
-			// Run baseline then target scans for this plugin.
-			list(, $json1,) = self::phpcs_scan( $runtime, $warn, [ $slug ], $excludes );
-			list(, $json2,) = self::phpcs_scan( $target, $warn, [ $slug ], $excludes );
-
-			$messages = [];
-			$ok1      = is_string( $json1 ) && '' !== $json1;
-			$ok2      = is_string( $json2 ) && '' !== $json2;
-			$report1  = $ok1 ? json_decode( $json1, true ) : null;
-			$report2  = $ok2 ? json_decode( $json2, true ) : null;
+		if ( $idx < $total ) {
+			$target         = $targets[ $idx ];
+			$runtime        = isset( $job['runtime'] ) ? (string) $job['runtime'] : self::get_runtime_major_minor();
+			$tver           = isset( $job['target'] ) ? (string) $job['target'] : '';
+			$warn           = ! empty( $job['include_warnings'] );
+			$excl           = isset( $job['extra_excludes'] ) && is_array( $job['extra_excludes'] ) ? $job['extra_excludes'] : [];
+			$paths          = [ (string) $target['path'] ];
+			list(, $json1,) = self::phpcs_scan_paths( $runtime, $warn, $paths, $excl );
+			list(, $json2,) = self::phpcs_scan_paths( $tver, $warn, $paths, $excl );
+			$report1        = is_string( $json1 ) && '' !== $json1 ? json_decode( $json1, true ) : null;
+			$report2        = is_string( $json2 ) && '' !== $json2 ? json_decode( $json2, true ) : null;
 			if ( is_array( $report1 ) && is_array( $report2 ) ) {
 				$delta = self::compute_delta( $report1, $report2 );
-				// Cap stored messages for stability.
 				if ( count( $delta ) > self::PER_PLUGIN_MSG_LIMIT ) {
 					$delta = array_slice( $delta, 0, self::PER_PLUGIN_MSG_LIMIT );
 				}
 				$messages = $delta;
 			} else {
-				$job['per_plugin'][ $slug ] = [ 'error' => 'Failed to parse JSON output for ' . $slug . '.' ];
+				$messages = [];
 			}
-
-			if ( ! isset( $job['per_plugin'][ $slug ] ) ) {
-				$job['per_plugin'][ $slug ] = [
-					'issues'   => count( $messages ),
-					'messages' => $messages,
-				];
-			}
-
+			$key                       = (string) $target['key'];
+			$job['per_target'][ $key ] = [
+				'issues'   => count( $messages ),
+				'messages' => $messages,
+				'type'     => (string) $target['type'],
+				'slug'     => (string) $target['slug'],
+				'label'    => (string) $target['label'],
+			];
 			++$idx;
 			$job['current_index'] = $idx;
 			$job['progress']      = (int) floor( ( $idx / $total ) * 100 );
-			$job['message']       = 'Processed ' . $idx . ' / ' . $total . ' plugins…';
+			$job['message']       = 'Processed ' . $idx . ' / ' . $total . ' items…';
 			$job['updated']       = time();
 			self::save_job( $job );
 		}
-
-		if ( $idx < $total ) {
-			// Schedule the next plugin scan.
-			wp_schedule_single_event( time() + 1, 'brightleaf_digital_php_checker_run_scan', [ $job_id ] );
-			return;
-		}
-
-		// Done. Build final HTML and persist summary for plugin badges.
-		$groups  = [];
-		$results = [];
-		foreach ( $plugins as $slug2 ) {
-			$entry             = $job['per_plugin'][ $slug2 ] ?? [];
-			$count             = isset( $entry['issues'] ) ? (int) $entry['issues'] : 0;
-			$results[ $slug2 ] = [ 'issues' => $count ];
-			if ( 0 < $count && isset( $entry['messages'] ) && is_array( $entry['messages'] ) ) {
-				$groups[ $slug2 ] = $entry['messages'];
+		if ( $idx >= $total ) {
+			// All done. Build HTML and store plugin badges.
+			$per_target        = isset( $job['per_target'] ) && is_array( $job['per_target'] ) ? $job['per_target'] : [];
+			$job['final_html'] = self::build_final_html_from_targets( (string) $job['runtime'], (string) $job['target'], $targets, $per_target );
+			$job['status']     = 'done';
+			$job['message']    = 'Completed.';
+			$job['progress']   = 100;
+			$job['updated']    = time();
+			// Persist plugin badges.
+			$results = [];
+			foreach ( $targets as $t ) {
+				if ( 'plugin' === $t['type'] ) {
+					$entry                 = $per_target[ $t['key'] ] ?? [];
+					$results[ $t['slug'] ] = [ 'issues' => (int) ( $entry['issues'] ?? 0 ) ];
+				}
 			}
+			update_option(
+                self::OPT_LAST_SCAN,
+                [
+					'runtime' => (string) $job['runtime'],
+					'target'  => (string) $job['target'],
+					'results' => $results,
+				],
+				false
+                );
+			self::save_job( $job );
 		}
-
-		update_option(
-			self::OPT_LAST_SCAN,
-			[
-				'runtime' => (string) $job['runtime'],
-				'target'  => (string) $job['target'],
-				'results' => $results,
-			],
-			false
-		);
-
-		$job['final_html'] = self::build_final_html_from_groups( (string) $job['runtime'], (string) $job['target'], $plugins, $groups );
-		$job['status']     = 'done';
-		$job['message']    = 'Completed.';
-		$job['progress']   = 100;
-		$job['updated']    = time();
-		self::save_job( $job );
+		return $job;
 	}
 
 	/**
-	 * Build final results HTML using stored per-plugin message groups.
+	 * Build final results HTML from per-target data.
 	 *
-	 * @param string              $runtime         Runtime PHP version.
-	 * @param string              $selected_target Target PHP version.
-	 * @param array<int,string>   $plugins         Plugin slugs.
-	 * @param array<string,array> $groups          Messages grouped by plugin.
+	 * @param string $runtime          Runtime PHP.
+	 * @param string $selected_target  Target PHP.
+	 * @param array  $targets          Targets list.
+	 * @param array  $per_target       Per-target results.
 	 * @return string HTML.
 	 */
-	private static function build_final_html_from_groups( string $runtime, string $selected_target, array $plugins, array $groups ): string {
-        $html  = '<hr />';
-		$html .= '<h2>Results: Baseline ' . self::h( $runtime ) . ' → Target ' . self::h( $selected_target ) . '</h2>';
-
-		if ( empty( $groups ) ) {
-			$html .= '<div class="notice notice-success"><p>All selected plugins show no new issues for PHP ' . self::h( $selected_target ) . ' compared to ' . self::h( $runtime ) . '. Compatible.</p></div>';
+	private static function build_final_html_from_targets( string $runtime, string $selected_target, array $targets, array $per_target ): string {
+		$html           = '<hr />';
+		$html          .= '<h2>Results: Baseline ' . self::h( $runtime ) . ' → Target ' . self::h( $selected_target ) . '</h2>';
+		$groups_plugins = [];
+		$groups_themes  = [];
+		foreach ( $targets as $t ) {
+			$key   = (string) $t['key'];
+			$entry = $per_target[ $key ] ?? [];
+			$cnt   = (int) ( $entry['issues'] ?? 0 );
+			if ( $cnt > 0 && isset( $entry['messages'] ) && is_array( $entry['messages'] ) ) {
+				if ( 'plugin' === $t['type'] ) {
+					$groups_plugins[ $t['slug'] ] = $entry['messages'];
+				} else {
+					$groups_themes[ $t['slug'] ] = $entry['messages'];
+				}
+			}
+		}
+		if ( empty( $groups_plugins ) && empty( $groups_themes ) ) {
+			$html .= '<div class="notice notice-success"><p>All selected items show no new issues for PHP ' . self::h( $selected_target ) . ' compared to ' . self::h( $runtime ) . '. Compatible.</p></div>';
 			return $html;
 		}
-
-		foreach ( $groups as $slug => $msgs ) {
-			$count = is_array( $msgs ) ? count( $msgs ) : 0;
-			$html .= '<h3 id="plugin-' . self::h( (string) $slug ) . '">' . self::h( (string) $slug ) . '</h3>';
-			$html .= '<p class="brightleaf-digital-php-checker-summary--bad">Not compatible with PHP ' . self::h( $selected_target ) . ' (new issues: ' . (int) $count . '). Consider contacting the developer or finding a replacement.</p>';
-			$html .= '<table class="widefat fixed striped"><thead><tr><th>File</th><th>Line</th><th>Col</th><th>Type</th><th>Message</th><th>Source</th></tr></thead><tbody>';
-			foreach ( $msgs as $m ) {
-				$file  = isset( $m['path'] ) ? (string) $m['path'] : '';
-				$line  = isset( $m['line'] ) ? (int) $m['line'] : 0;
-				$col   = isset( $m['column'] ) ? (int) $m['column'] : 0;
-				$type  = isset( $m['type'] ) ? (string) $m['type'] : '';
-				$msg   = isset( $m['message'] ) ? (string) $m['message'] : '';
-				$src   = isset( $m['source'] ) ? (string) $m['source'] : '';
-				$html .= '<tr class="' . self::h( $type ) . '"><td>' . self::h( preg_replace( '#^.*/wp-content/plugins/#', '', $file ) ) . '</td><td>' . $line . '</td><td>' . $col . '</td><td><strong>' . self::h( $type ) . '</strong></td><td>' . self::h( $msg ) . '</td><td><code>' . self::h( $src ) . '</code></td></tr>';
+		if ( ! empty( $groups_plugins ) ) {
+			$html .= '<h2>Plugins</h2>';
+			foreach ( $groups_plugins as $slug => $msgs ) {
+				$count = is_array( $msgs ) ? count( $msgs ) : 0;
+				$html .= '<h3 id="plugin-' . self::h( (string) $slug ) . '">' . self::h( (string) $slug ) . '</h3>';
+				$html .= '<p class="brightleaf-digital-php-checker-summary--bad">Not compatible with PHP ' . self::h( $selected_target ) . ' (new issues: ' . (int) $count . '). Consider contacting the developer or finding a replacement.</p>';
+				$html .= '<table class="widefat fixed striped"><thead><tr><th>File</th><th>Line</th><th>Col</th><th>Type</th><th>Message</th><th>Source</th></tr></thead><tbody>';
+				foreach ( $msgs as $m ) {
+					$file  = isset( $m['path'] ) ? (string) $m['path'] : '';
+					$line  = isset( $m['line'] ) ? (int) $m['line'] : 0;
+					$col   = isset( $m['column'] ) ? (int) $m['column'] : 0;
+					$type  = isset( $m['type'] ) ? (string) $m['type'] : '';
+					$msg   = isset( $m['message'] ) ? (string) $m['message'] : '';
+					$src   = isset( $m['source'] ) ? (string) $m['source'] : '';
+					$html .= '<tr class="' . self::h( $type ) . '"><td>' . self::h( preg_replace( '#^.*/wp-content/plugins/#', '', $file ) ) . '</td><td>' . $line . '</td><td>' . $col . '</td><td><strong>' . self::h( $type ) . '</strong></td><td>' . self::h( $msg ) . '</td><td><code>' . self::h( $src ) . '</code></td></tr>';
+				}
+				$html .= '</tbody></table>';
 			}
-			$html .= '</tbody></table>';
 		}
-
-		$incompatible = array_keys( $groups );
-		$compatible   = array_values( array_diff( $plugins, $incompatible ) );
-		if ( ! empty( $compatible ) ) {
-			$html .= '<h2>Compatible plugins</h2><ul class="ul-disc">';
-			foreach ( $compatible as $slug2 ) {
-				$html .= '<li><strong>' . self::h( (string) $slug2 ) . '</strong>: <span class="brightleaf-digital-php-checker-summary--ok">Compatible with PHP ' . self::h( $selected_target ) . ' (no new issues)</span></li>';
+		if ( ! empty( $groups_themes ) ) {
+			$html .= '<h2>Themes</h2>';
+			foreach ( $groups_themes as $slug => $msgs ) {
+				$count = is_array( $msgs ) ? count( $msgs ) : 0;
+				$html .= '<h3 id="theme-' . self::h( (string) $slug ) . '">' . self::h( (string) $slug ) . '</h3>';
+				$html .= '<p class="brightleaf-digital-php-checker-summary--bad">Not compatible with PHP ' . self::h( $selected_target ) . ' (new issues: ' . (int) $count . '). Consider contacting the developer or finding a replacement.</p>';
+				$html .= '<table class="widefat fixed striped"><thead><tr><th>File</th><th>Line</th><th>Col</th><th>Type</th><th>Message</th><th>Source</th></tr></thead><tbody>';
+				foreach ( $msgs as $m ) {
+					$file  = isset( $m['path'] ) ? (string) $m['path'] : '';
+					$line  = isset( $m['line'] ) ? (int) $m['line'] : 0;
+					$col   = isset( $m['column'] ) ? (int) $m['column'] : 0;
+					$type  = isset( $m['type'] ) ? (string) $m['type'] : '';
+					$msg   = isset( $m['message'] ) ? (string) $m['message'] : '';
+					$src   = isset( $m['source'] ) ? (string) $m['source'] : '';
+					$html .= '<tr class="' . self::h( $type ) . '"><td>' . self::h( preg_replace( '#^.*/wp-content/themes/#', '', $file ) ) . '</td><td>' . $line . '</td><td>' . $col . '</td><td><strong>' . self::h( $type ) . '</strong></td><td>' . self::h( $msg ) . '</td><td><code>' . self::h( $src ) . '</code></td></tr>';
+				}
+				$html .= '</tbody></table>';
 			}
-			$html .= '</ul>';
 		}
-
 		return $html;
+	}
+
+	/**
+	 * AJAX: Cancel a running scan.
+	 */
+	public static function ajax_scan_cancel(): void {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( [ 'message' => 'Insufficient permissions.' ] );
+		}
+		check_ajax_referer( 'brightleaf_digital_php_checker', 'brightleaf_digital_php_checker_nonce' );
+		$job_id = isset( $_POST['job_id'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['job_id'] ) ) : '';// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified via check_ajax_referer.
+		if ( '' === $job_id ) {
+			wp_send_json_error( [ 'message' => 'Missing job_id.' ] );
+		}
+		$job = self::get_job( $job_id );
+		if ( empty( $job ) ) {
+			wp_send_json_error( [ 'message' => 'Job not found.' ] );
+		}
+		$job['cancel_requested'] = true;
+		$job['status']           = 'cancelling';
+		$job['updated']          = time();
+		self::save_job( $job );
+		wp_send_json_success( [ 'status' => 'cancelling' ] );
+	}
+
+	/**
+	 * AJAX: Toggle pause/resume.
+	 */
+	public static function ajax_scan_toggle_pause(): void {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( [ 'message' => 'Insufficient permissions.' ] );
+		}
+		check_ajax_referer( 'brightleaf_digital_php_checker', 'brightleaf_digital_php_checker_nonce' );
+		$job_id = isset( $_POST['job_id'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['job_id'] ) ) : '';// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified via check_ajax_referer.
+		if ( '' === $job_id ) {
+			wp_send_json_error( [ 'message' => 'Missing job_id.' ] );
+		}
+		$job = self::get_job( $job_id );
+		if ( empty( $job ) ) {
+			wp_send_json_error( [ 'message' => 'Job not found.' ] );
+		}
+		$paused         = ! empty( $job['paused'] );
+		$job['paused']  = ! $paused;
+		$job['status']  = $job['paused'] ? 'paused' : 'running';
+		$job['message'] = $job['paused'] ? 'Paused.' : 'Resumed.';
+		$job['updated'] = time();
+		self::save_job( $job );
+		wp_send_json_success( [ 'status' => $job['status'] ] );
 	}
 }
 
