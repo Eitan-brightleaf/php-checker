@@ -23,10 +23,12 @@ if ( ! defined( 'ABSPATH' ) ) {
  * Also stores a summary next to each plugin on the plugins list page.
  */
 class BrightLeaf_Digital_Php_Checker_Plugin {
-	const OPT_LAST_SCAN        = 'brightleaf_digital_php_checker_last_scan_results';
-	const TRANSIENT_PREFIX     = 'brightleaf_digital_php_checker_job_';
-	const JOB_TTL              = 21600; // 6 hours
-	const PER_PLUGIN_MSG_LIMIT = 300; // cap stored messages per plugin for stability
+		const OPT_LAST_SCAN    = 'brightleaf_digital_php_checker_last_scan_results';
+		const TRANSIENT_PREFIX = 'brightleaf_digital_php_checker_job_';
+		const JOB_TTL          = 21600; // 6 hours
+		// Badges auto-expire after 30 days by default.
+		const BADGE_TTL            = 2592000; // 30 days
+		const PER_PLUGIN_MSG_LIMIT = 300; // cap stored messages per plugin for stability
 
 	/**
      * Hook WordPress actions/filters for the plugin lifecycle.
@@ -56,7 +58,19 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
      * Currently a placeholder.
      */
  	public static function maybe_bootstrap(): void {
-		// Placeholder for future dependency checks if needed.
+		// Clear stale badges when expired or when runtime meets/exceeds stored target.
+		$opt = get_option( self::OPT_LAST_SCAN );
+		if ( is_array( $opt ) ) {
+			$runtime       = self::get_runtime_major_minor();
+			$stored_target = isset( $opt['target'] ) ? (string) $opt['target'] : '';
+			$created       = isset( $opt['created'] ) ? (int) $opt['created'] : 0;
+			$expired       = $created > 0 && ( time() - $created ) > self::BADGE_TTL;
+			$upgraded      = '' !== $stored_target && version_compare( $runtime, $stored_target, '>=' );
+
+			if ( $expired || $upgraded ) {
+				delete_option( self::OPT_LAST_SCAN );
+			}
+		}
 	}
 
 	/**
@@ -712,6 +726,7 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 				'runtime' => $runtime,
 				'target'  => $selected_target,
 				'results' => $results,
+				'created' => time(),
 			],
 			false
 		);
@@ -1105,14 +1120,15 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 				}
 			}
 			update_option(
-                self::OPT_LAST_SCAN,
-                [
+				self::OPT_LAST_SCAN,
+				[
 					'runtime' => (string) $job['runtime'],
 					'target'  => (string) $job['target'],
 					'results' => $results,
+					'created' => time(),
 				],
 				false
-                );
+				);
 			self::save_job( $job );
 		}
 		return $job;
