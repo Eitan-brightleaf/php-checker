@@ -222,8 +222,8 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 	/**
      * Run a shell command assembling stdout, stderr and exit code.
      *
-     * Uses proc_open when available; falls back to exec() if proc_open is
-     * disabled in the PHP configuration. Falls back captures combined output.
+     * Uses exec() only. If exec() is disabled, returns an error and callers should
+     * fall back to the embedded runner.
      *
      * @param array<int,string> $cmd_parts Command parts to be imploded with spaces.
      * @return array{0:int,1:string,2:string,3:string} [exitCode, stdout, stderr, fullCmd]
@@ -236,36 +236,16 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 
 		$disabled       = ini_get( 'disable_functions' );
 		$disabled_list  = is_string( $disabled ) && '' !== $disabled ? array_map( 'trim', explode( ',', $disabled ) ) : [];
-		$proc_available = function_exists( 'proc_open' ) && ! in_array( 'proc_open', $disabled_list, true );
+		$exec_available = function_exists( 'exec' ) && ! in_array( 'exec', $disabled_list, true );
 
-		if ( $proc_available ) {
-			$descriptor = [
-				1 => [ 'pipe', 'w' ],
-				2 => [ 'pipe', 'w' ],
-			];
-			$proc       = proc_open( $cmd, $descriptor, $pipes, ABSPATH ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.system_calls_proc_open
-			if ( is_resource( $proc ) ) {
-				$out = stream_get_contents( $pipes[1] );
-				$err = stream_get_contents( $pipes[2] );
-				foreach ( $pipes as $p ) {
-					if ( is_resource( $p ) ) {
-						// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-						fclose( $p );
-					}
-				}
-				$code = proc_close( $proc );
-			}
+		if ( $exec_available ) {
+			$lines = [];
+			// Capture both stdout and stderr to lines.
+			// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.system_calls_exec
+			exec( $cmd . ' 2>&1', $lines, $code );
+			$out = implode( "\n", $lines );
 		} else {
-			$exec_available = function_exists( 'exec' ) && ! in_array( 'exec', $disabled_list, true );
-			if ( $exec_available ) {
-				$lines = [];
-				// Capture both stdout and stderr to lines.
-				// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.system_calls_exec
-				exec( $cmd . ' 2>&1', $lines, $code );
-				$out = implode( "\n", $lines );
-			} else {
-				$err = 'Unable to run command: both proc_open() and exec() are disabled on this server.';
-			}
+			$err = 'Unable to run command: exec() is disabled on this server.';
 		}
 
 		return [ $code, $out, $err, $cmd ];
@@ -318,9 +298,8 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 		}
 		$disabled      = ini_get( 'disable_functions' );
 		$disabled_list = is_string( $disabled ) && '' !== $disabled ? array_map( 'trim', explode( ',', $disabled ) ) : [];
-		$proc_ok       = function_exists( 'proc_open' ) && ! in_array( 'proc_open', $disabled_list, true );
 		$exec_ok       = function_exists( 'exec' ) && ! in_array( 'exec', $disabled_list, true );
-		return ( $proc_ok || $exec_ok );
+		return $exec_ok;
 	}
 
 	/**
