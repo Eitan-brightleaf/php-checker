@@ -1,0 +1,11 @@
+/* Tools page styles */
+.brightleaf-digital-php-checker-wrap .brightleaf-digital-php-checker-meta{color:#555}
+.brightleaf-digital-php-checker-plugin-list{max-height:220px;overflow:auto;border:1px solid #ddd;padding:8px}
+.brightleaf-digital-php-checker-summary--ok{color:#0a8a0a;font-weight:600}
+.brightleaf-digital-php-checker-summary--bad{color:#b00020;font-weight:600}
+.brightleaf-digital-php-checker-toplink{font-size:12px;margin-left:6px}
+
+/* Plugin badges */
+.brightleaf-digital-php-checker-badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:600}
+.brightleaf-digital-php-checker-badge--ok{background:#e7f7ea;color:#0a8a0a;border:1px solid #bfe6c7}
+.brightleaf-digital-php-checker-badge--bad{background:#fde7ea;color:#b00020;border:1px solid #f6c2ca}

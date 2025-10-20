@@ -8,9 +8,9 @@
   "extra": {
     "strauss": {
       "target_directory": "vendor",
-      "namespace_prefix": "PCD\\",
-      "classmap_prefix": "PCD_",
-      "constant_prefix": "PCD_"
+      "namespace_prefix": "BrightleafDigitalPhpChecker\\",
+      "classmap_prefix": "BrightleafDigitalPhpChecker_",
+      "constant_prefix": "BRIGHTLEAF_DIGITAL_PHP_CHECKER_"
     }
   },
   "scripts": {

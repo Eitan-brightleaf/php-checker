@@ -1,24 +1,28 @@
 <?php
 /**
- * Plugin Name: PHP Compatibility Delta
- * Description: Scan WordPress plugins for new PHPCompatibility issues between the current runtime PHP and a single target version. Outputs inline HTML; supports warnings opt-in. Stores a note next to each plugin name with the latest scan result.
- * Version: 0.1.0
- * Author: Brightleaf
+ * Plugin Name: PHP Compatibility Checker
+ * Author URI: https://digital.brightleaf.info/
+ * Description: Scan WordPress plugins for PHP compatibility issues between current PHP and newer versions. Shows inline results and stores scan summaries.
+ * Version: 1.0.0
+ * Author: BrightLeaf Digital
+ * License: GPL-2.0+
+ * Requires PHP: 7.4
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
-	exit; }
+	exit;
+}
 
 /**
- * Main plugin class for PHP Compatibility Delta.
+ * Main plugin class for PHP Compatibility Checker.
  *
  * Provides an admin Tools page to scan installed plugins for new PHPCompatibility
  * issues between the current runtime PHP version and a chosen target PHP version.
  * Also stores a summary next to each plugin on the plugins list page.
  */
-class PCD_Plugin {
-	const OPT_LAST_SCAN        = 'pcd_last_scan_results';
-	const TRANSIENT_PREFIX     = 'pcd_job_';
+class BrightLeaf_Digital_Php_Checker_Plugin {
+	const OPT_LAST_SCAN        = 'brightleaf_digital_php_checker_last_scan_results';
+	const TRANSIENT_PREFIX     = 'brightleaf_digital_php_checker_job_';
 	const JOB_TTL              = 21600; // 6 hours
 	const PER_PLUGIN_MSG_LIMIT = 300; // cap stored messages per plugin for stability
 
@@ -36,11 +40,11 @@ class PCD_Plugin {
 		add_action( 'admin_init', [ __CLASS__, 'maybe_bootstrap' ] );
 		add_action( 'admin_enqueue_scripts', [ __CLASS__, 'enqueue_assets' ] );
 		add_filter( 'plugin_row_meta', [ __CLASS__, 'plugin_row_meta_note' ], 10, 2 );
-		add_action( 'wp_ajax_pcd_scan', [ __CLASS__, 'ajax_scan' ] );
+		add_action( 'wp_ajax_brightleaf_digital_php_checker_scan', [ __CLASS__, 'ajax_scan' ] );
 		// Async job endpoints and cron runner.
-		add_action( 'wp_ajax_pcd_scan_start', [ __CLASS__, 'ajax_scan_start' ] );
-		add_action( 'wp_ajax_pcd_scan_status', [ __CLASS__, 'ajax_scan_status' ] );
-		add_action( 'pcd_run_scan', [ __CLASS__, 'cron_run_scan' ], 10, 1 );
+		add_action( 'wp_ajax_brightleaf_digital_php_checker_scan_start', [ __CLASS__, 'ajax_scan_start' ] );
+		add_action( 'wp_ajax_brightleaf_digital_php_checker_scan_status', [ __CLASS__, 'ajax_scan_status' ] );
+		add_action( 'brightleaf_digital_php_checker_run_scan', [ __CLASS__, 'cron_run_scan' ], 10, 1 );
 	}
 
 	/**
@@ -53,7 +57,7 @@ class PCD_Plugin {
 	}
 
 	/**
-     * Register the Tools page under Tools > PHP Compatibility Delta.
+     * Register the Tools page under Tools > PHP Compatibility Checker.
      *
      * Checks user capability before registering the page.
      */
@@ -62,8 +66,8 @@ class PCD_Plugin {
 			return;
 		}
 		add_management_page(
-			'PHP Compatibility Delta',
-			'PHP Compatibility Delta',
+			'PHP Compatibility Checker',
+			'PHP Compatibility Checker',
 			'manage_options',
 			'php-compat-delta',
 			[ __CLASS__, 'render_page' ]
@@ -116,11 +120,11 @@ class PCD_Plugin {
 	 * }
 	 */
 	private static function parse_request( array $src ): array {
-		$selected_target    = isset( $src['pcd_target'] ) ? preg_replace( '/[^0-9\.]+/', '', (string) wp_unslash( $src['pcd_target'] ) ) : '';
-		$include_warnings   = ! empty( $src['pcd_include_warnings'] );
-		$scan_all           = ! empty( $src['pcd_scan_all'] );
-		$sel_plugins        = ( isset( $src['pcd_plugins'] ) && is_array( $src['pcd_plugins'] ) ) ? array_map( 'sanitize_text_field', wp_unslash( $src['pcd_plugins'] ) ) : [];
-		$extra_excludes_raw = isset( $src['pcd_extra_excludes'] ) ? (string) wp_unslash( $src['pcd_extra_excludes'] ) : '';
+		$selected_target    = isset( $src['brightleaf_digital_php_checker_target'] ) ? preg_replace( '/[^0-9\.]+/', '', (string) wp_unslash( $src['brightleaf_digital_php_checker_target'] ) ) : '';
+		$include_warnings   = ! empty( $src['brightleaf_digital_php_checker_include_warnings'] );
+		$scan_all           = ! empty( $src['brightleaf_digital_php_checker_scan_all'] );
+		$sel_plugins        = ( isset( $src['brightleaf_digital_php_checker_plugins'] ) && is_array( $src['brightleaf_digital_php_checker_plugins'] ) ) ? array_map( 'sanitize_text_field', wp_unslash( $src['brightleaf_digital_php_checker_plugins'] ) ) : [];
+		$extra_excludes_raw = isset( $src['brightleaf_digital_php_checker_extra_excludes'] ) ? (string) wp_unslash( $src['brightleaf_digital_php_checker_extra_excludes'] ) : '';
 		$extra_excludes     = array_filter( array_map( 'trim', explode( ',', $extra_excludes_raw ) ) );
 
 		return [
@@ -381,8 +385,8 @@ class PCD_Plugin {
 		$assets_base_url  = plugin_dir_url( __FILE__ ) . 'assets/';
 		$assets_base_path = plugin_dir_path( __FILE__ ) . 'assets/';
 
-		$css_rel  = 'css/pcd-admin.css';
-		$js_rel   = 'js/pcd-admin.js';
+		$css_rel  = 'css/brightleaf-digital-php-checker-admin.css';
+		$js_rel   = 'js/brightleaf-digital-php-checker-admin.js';
 		$css_file = $assets_base_path . $css_rel;
 		$js_file  = $assets_base_path . $js_rel;
 		$css_ver  = file_exists( $css_file ) ? (string) filemtime( $css_file ) : '1';
@@ -390,16 +394,16 @@ class PCD_Plugin {
 
 		// Enqueue CSS on the Tools page and Plugins screens.
 		if ( 'tools_page_php-compat-delta' === $hook || 'plugins' === $hook || 'plugins-network' === $hook ) {
-			wp_enqueue_style( 'pcd-admin', $assets_base_url . $css_rel, [], $css_ver );
+			wp_enqueue_style( 'brightleaf-digital-php-checker-admin', $assets_base_url . $css_rel, [], $css_ver );
 		}
 
 		// Enqueue JS only on the Tools page.
 		if ( 'tools_page_php-compat-delta' === $hook ) {
-			wp_enqueue_script( 'pcd-admin', $assets_base_url . $js_rel, [ 'jquery' ], $js_ver, true );
+			wp_enqueue_script( 'brightleaf-digital-php-checker-admin', $assets_base_url . $js_rel, [ 'jquery' ], $js_ver, true );
 			// Provide polling configuration.
 			wp_localize_script(
-                'pcd-admin',
-                'pcdAjax',
+                'brightleaf-digital-php-checker-admin',
+                'brightleaf_digital_php_checker_Ajax',
                 [
 					'ajaxUrl'      => admin_url( 'admin-ajax.php' ),
 					'pollInterval' => 3000,
@@ -425,7 +429,7 @@ class PCD_Plugin {
 			$runtime = isset( $opt['runtime'] ) ? (string) $opt['runtime'] : '';
 			$target  = isset( $opt['target'] ) ? (string) $opt['target'] : '';
 			$issues  = isset( $info['issues'] ) ? (int) $info['issues'] : 0;
-			$cls     = 0 < $issues ? 'pcd-badge pcd-badge--bad' : 'pcd-badge pcd-badge--ok';
+			$cls     = 0 < $issues ? 'brightleaf-digital-php-checker-badge brightleaf-digital-php-checker-badge--bad' : 'brightleaf-digital-php-checker-badge brightleaf-digital-php-checker-badge--ok';
 			$txt     = 0 < $issues
 				? ( 'PHP ' . $runtime . '→' . $target . ': ' . $issues . ' new issues' )
 				: ( 'PHP ' . $runtime . '→' . $target . ': OK' );
@@ -445,7 +449,7 @@ class PCD_Plugin {
 		$all_plugins = self::list_plugins();
 
 		// Verify nonce before processing any input.
-        $nonce_ok = isset( $_POST['pcd_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( (string) $_POST['pcd_nonce'] ) ), 'pcd' );
+      		$nonce_ok = isset( $_POST['brightleaf_digital_php_checker_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( (string) $_POST['brightleaf_digital_php_checker_nonce'] ) ), 'brightleaf_digital_php_checker' );
 
 		// Defaults.
 		$selected_target    = '';
@@ -477,39 +481,39 @@ class PCD_Plugin {
 			)
 		);
 
-		echo '<div class="wrap pcd-wrap">';
-		echo '<h1>PHP Compatibility Delta</h1>';
-		echo '<p class="pcd-meta">Baseline: <code>' . esc_html( $runtime ) . '</code> (current runtime). Choose one target to compare against.</p>';
+		echo '<div class="wrap brightleaf-digital-php-checker-wrap">';
+		echo '<h1>PHP Compatibility Checker</h1>';
+		echo '<p class="brightleaf-digital-php-checker-meta">Baseline: <code>' . esc_html( $runtime ) . '</code> (current runtime). Choose one target to compare against.</p>';
 
-		echo '<form id="pcd-form" method="post">';
-		wp_nonce_field( 'pcd', 'pcd_nonce' );
+		echo '<form id="brightleaf-digital-php-checker-form" method="post">';
+		wp_nonce_field( 'brightleaf_digital_php_checker', 'brightleaf_digital_php_checker_nonce' );
 		echo '<table class="form-table"><tbody>';
-		echo '<tr><th><label for="pcd_target">Target PHP</label></th><td><select id="pcd_target" name="pcd_target">';
+		echo '<tr><th><label for="brightleaf-digital-php-checker-target">Target PHP</label></th><td><select id="brightleaf-digital-php-checker-target" name="brightleaf_digital_php_checker_target">';
 		foreach ( $targets_filtered as $t ) {
 			echo '<option value="' . esc_attr( (string) $t ) . '"' . selected( (string) $t, $selected_target, false ) . '>' . esc_html( (string) $t ) . '</option>';
 		}
 		echo '</select></td></tr>';
 
-		echo '<tr><th><label for="pcd_include_warnings">Include warnings</label></th><td><label><input type="checkbox" id="pcd_include_warnings" name="pcd_include_warnings" value="1"' . checked( $include_warnings, true, false ) . '> Include warnings</label></td></tr>';
+		echo '<tr><th><label for="brightleaf-digital-php-checker-include-warnings">Include warnings</label></th><td><label><input type="checkbox" id="brightleaf-digital-php-checker-include-warnings" name="brightleaf_digital_php_checker_include_warnings" value="1"' . checked( $include_warnings, true, false ) . '> Include warnings</label></td></tr>';
 
 		echo '<tr><th>Plugins</th><td>';
-		echo '<label><input type="checkbox" name="pcd_scan_all" value="1"' . checked( $scan_all, true, false ) . '> Scan all plugins</label>';
+		echo '<label><input type="checkbox" name="brightleaf_digital_php_checker_scan_all" value="1"' . checked( $scan_all, true, false ) . '> Scan all plugins</label>';
 		echo '<p><em>Or select specific plugins:</em></p>';
-		echo '<div class="pcd-plugin-list">';
+		echo '<div class="brightleaf-digital-php-checker-plugin-list">';
 		foreach ( $all_plugins as $slug ) {
 			$is_checked = in_array( $slug, $sel_plugins, true );
-			echo '<label style="display:block"><input type="checkbox" name="pcd_plugins[]" value="' . esc_attr( $slug ) . '"' . checked( $is_checked, true, false ) . '> ' . esc_html( $slug ) . '</label>';
+			echo '<label style="display:block"><input type="checkbox" name="brightleaf_digital_php_checker_plugins[]" value="' . esc_attr( $slug ) . '"' . checked( $is_checked, true, false ) . '> ' . esc_html( $slug ) . '</label>';
 		}
 		echo '</div>';
 		echo '</td></tr>';
 
-		echo '<tr><th><label for="pcd_extra_excludes">Extra excludes</label></th><td><input type="text" id="pcd_extra_excludes" name="pcd_extra_excludes" value="' . esc_attr( $extra_excludes_raw ) . '" class="regular-text"> <span class="description">Comma-separated sniff codes to exclude if a scan fails.</span></td></tr>';
+		echo '<tr><th><label for="brightleaf-digital-php-checker-extra-excludes">Extra excludes</label></th><td><input type="text" id="brightleaf-digital-php-checker-extra-excludes" name="brightleaf_digital_php_checker_extra_excludes" value="' . esc_attr( $extra_excludes_raw ) . '" class="regular-text"> <span class="description">Comma-separated sniff codes to exclude if a scan fails.</span></td></tr>';
 		echo '</tbody></table>';
 		echo '<p><button type="submit" class="button button-primary">Run scan</button></p>';
 		echo '</form>';
 
 		// Results container for AJAX responses.
-		echo '<div id="pcd-results"></div>';
+		echo '<div id="brightleaf-digital-php-checker-results"></div>';
 
 		// Non-AJAX fallback when directly posting the form (e.g., if JS disabled).
 		if ( $nonce_ok && '' !== $selected_target ) {
@@ -604,7 +608,7 @@ class PCD_Plugin {
 		foreach ( $groups as $slug => $msgs ) {
 			$count = count( $msgs );
 			$html .= '<h3 id="plugin-' . self::h( $slug ) . '">' . self::h( $slug ) . '</h3>';
-			$html .= '<p class="pcd-summary--bad">Not compatible with PHP ' . self::h( $selected_target ) . ' (new issues: ' . (int) $count . '). Consider contacting the developer or finding a replacement.</p>';
+			$html .= '<p class="brightleaf-digital-php-checker-summary--bad">Not compatible with PHP ' . self::h( $selected_target ) . ' (new issues: ' . (int) $count . '). Consider contacting the developer or finding a replacement.</p>';
 			$html .= '<table class="widefat fixed striped"><thead><tr><th>File</th><th>Line</th><th>Col</th><th>Type</th><th>Message</th><th>Source</th></tr></thead><tbody>';
 			foreach ( $msgs as $m ) {
 				$file  = isset( $m['path'] ) ? (string) $m['path'] : '';
@@ -624,7 +628,7 @@ class PCD_Plugin {
 		if ( ! empty( $compatible ) ) {
 			$html .= '<h2>Compatible plugins</h2><ul class="ul-disc">';
 			foreach ( $compatible as $slug ) {
-				$html .= '<li><strong>' . self::h( $slug ) . '</strong>: <span class="pcd-summary--ok">Compatible with PHP ' . self::h( $selected_target ) . ' (no new issues)</span></li>';
+				$html .= '<li><strong>' . self::h( $slug ) . '</strong>: <span class="brightleaf-digital-php-checker-summary--ok">Compatible with PHP ' . self::h( $selected_target ) . ' (no new issues)</span></li>';
 			}
 			$html .= '</ul>';
 		}
@@ -639,7 +643,7 @@ class PCD_Plugin {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			wp_send_json_error( [ 'message' => 'Insufficient permissions.' ] );
 		}
-		check_ajax_referer( 'pcd', 'pcd_nonce' );
+		check_ajax_referer( 'brightleaf_digital_php_checker', 'brightleaf_digital_php_checker_nonce' );
 
 		$runtime     = self::get_runtime_major_minor();
 		$all_plugins = self::list_plugins();
@@ -716,7 +720,7 @@ class PCD_Plugin {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			wp_send_json_error( [ 'message' => 'Insufficient permissions.' ] );
 		}
-		check_ajax_referer( 'pcd', 'pcd_nonce' );
+		check_ajax_referer( 'brightleaf_digital_php_checker', 'brightleaf_digital_php_checker_nonce' );
 
 		$runtime     = self::get_runtime_major_minor();
 		$all_plugins = self::list_plugins();
@@ -765,7 +769,7 @@ class PCD_Plugin {
 		self::save_job( $job );
 
 		// Schedule first tick right away.
-		wp_schedule_single_event( time(), 'pcd_run_scan', [ $job_id ] );
+		wp_schedule_single_event( time(), 'brightleaf_digital_php_checker_run_scan', [ $job_id ] );
 
 		wp_send_json_success( [ 'job_id' => $job_id ] );
 	}
@@ -779,7 +783,7 @@ class PCD_Plugin {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			wp_send_json_error( [ 'message' => 'Insufficient permissions.' ] );
 		}
-		check_ajax_referer( 'pcd', 'pcd_nonce' );
+		check_ajax_referer( 'brightleaf_digital_php_checker', 'brightleaf_digital_php_checker_nonce' );
 
 		$job_id = isset( $_POST['job_id'] ) ? sanitize_text_field( wp_unslash( (string) $_POST['job_id'] ) ) : '';// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified via check_ajax_referer.
 		if ( '' === $job_id ) {
@@ -876,7 +880,7 @@ class PCD_Plugin {
 
 		if ( $idx < $total ) {
 			// Schedule the next plugin scan.
-			wp_schedule_single_event( time() + 1, 'pcd_run_scan', [ $job_id ] );
+			wp_schedule_single_event( time() + 1, 'brightleaf_digital_php_checker_run_scan', [ $job_id ] );
 			return;
 		}
 
@@ -931,7 +935,7 @@ class PCD_Plugin {
 		foreach ( $groups as $slug => $msgs ) {
 			$count = is_array( $msgs ) ? count( $msgs ) : 0;
 			$html .= '<h3 id="plugin-' . self::h( (string) $slug ) . '">' . self::h( (string) $slug ) . '</h3>';
-			$html .= '<p class="pcd-summary--bad">Not compatible with PHP ' . self::h( $selected_target ) . ' (new issues: ' . (int) $count . '). Consider contacting the developer or finding a replacement.</p>';
+			$html .= '<p class="brightleaf-digital-php-checker-summary--bad">Not compatible with PHP ' . self::h( $selected_target ) . ' (new issues: ' . (int) $count . '). Consider contacting the developer or finding a replacement.</p>';
 			$html .= '<table class="widefat fixed striped"><thead><tr><th>File</th><th>Line</th><th>Col</th><th>Type</th><th>Message</th><th>Source</th></tr></thead><tbody>';
 			foreach ( $msgs as $m ) {
 				$file  = isset( $m['path'] ) ? (string) $m['path'] : '';
@@ -950,7 +954,7 @@ class PCD_Plugin {
 		if ( ! empty( $compatible ) ) {
 			$html .= '<h2>Compatible plugins</h2><ul class="ul-disc">';
 			foreach ( $compatible as $slug2 ) {
-				$html .= '<li><strong>' . self::h( (string) $slug2 ) . '</strong>: <span class="pcd-summary--ok">Compatible with PHP ' . self::h( $selected_target ) . ' (no new issues)</span></li>';
+				$html .= '<li><strong>' . self::h( (string) $slug2 ) . '</strong>: <span class="brightleaf-digital-php-checker-summary--ok">Compatible with PHP ' . self::h( $selected_target ) . ' (no new issues)</span></li>';
 			}
 			$html .= '</ul>';
 		}
@@ -959,4 +963,4 @@ class PCD_Plugin {
 	}
 }
 
-PCD_Plugin::init();
+BrightLeaf_Digital_Php_Checker_Plugin::init();
