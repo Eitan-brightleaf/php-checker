@@ -1,6 +1,6 @@
 <?php
 /**
- * Plugin Name: PHP Compatibility Scanner
+ * Plugin Name: BrightLeaf Digital PHP Compatibility Scanner
  * Author URI: https://digital.brightleaf.info/
  * Description: Scan WordPress plugins for PHP compatibility issues between current PHP and newer versions. Shows inline results and stores scan summaries.
  * Version: 1.0.0

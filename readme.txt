@@ -1,4 +1,4 @@
-=== PHP Compatibility Scanner ===
+=== BrightLeaf Digital PHP Compatibility Scanner ===
 Contributors: eitanatbrightleaf
 Tags: php, compatibility, plugins, themes, scan
 Tested up to: 6.8
