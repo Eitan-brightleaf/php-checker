@@ -186,86 +186,6 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 	}
 
 	/**
-     * Find the phpcs executable path.
-     *
-     * Prefer the plugin-local vendor/bin first, falling back to project root vendor/bin.
-     *
-     * @return string Absolute path to phpcs (may not exist).
-     */
- 	private static function find_phpcs_binary(): string {
-		// Prefer plugin-local vendor first (after composer install), then root vendor.
-		$local = plugin_dir_path( __FILE__ ) . 'vendor/bin/phpcs';
-		if ( file_exists( $local ) && is_executable( $local ) ) {
-			return $local; }
-        return ABSPATH . 'vendor/bin/phpcs';
-	}
-
-	/**
-     * Build the phpcs command line for a given target version and input paths.
-     *
-     * @param string $php_minor        Target PHP version (major.minor).
-     * @param bool   $include_warnings Whether to include warnings in results.
-     * @param array  $targets          Paths to scan.
-     * @param array  $extra_excludes   Extra sniff codes to exclude.
-     * @return array<int,string> Command parts.
-     */
- 	private static function build_phpcs_cmd( string $php_minor, bool $include_warnings, array $targets, array $extra_excludes ): array {
-		$bin    = self::find_phpcs_binary();
-		$ignore = '*/tests/*,*/Tests/*,*/test/*,*/Test/*,*/__tests__/*,*/spec/*,*/Spec/*,*/examples/*,*/example/*,*/Fixtures/*,*/fixtures/*,*/vendor/*/tests/*,*/vendor/*/*Tests/*,*/vendor_prefixed/*/Tests/*,*/vendor-scoped/*/Tests/*,*/third-party/*/Tests/*';
-		$args   = [
-			escapeshellarg( $bin ),
-			'--report=json',
-			'--standard=PHPCompatibilityWP',
-			'--extensions=php',
-			'--runtime-set',
-			'testVersion',
-			escapeshellarg( $php_minor . '-' . $php_minor ),
-			'--ignore=' . escapeshellarg( $ignore ),
-		];
-		if ( ! empty( $extra_excludes ) ) {
-			$args[] = '--exclude=' . escapeshellarg( implode( ',', array_unique( array_filter( $extra_excludes ) ) ) );
-		}
-		if ( ! $include_warnings ) {
-			$args[] = '--warning-severity=0';
-		}
-		foreach ( $targets as $t ) {
-			$args[] = escapeshellarg( $t ); }
-		return $args;
-	}
-
-	/**
-     * Run a shell command assembling stdout, stderr and exit code.
-     *
-     * Uses exec() only. If exec() is disabled, returns an error and callers should
-     * fall back to the embedded runner.
-     *
-     * @param array<int,string> $cmd_parts Command parts to be imploded with spaces.
-     * @return array{0:int,1:string,2:string,3:string} [exitCode, stdout, stderr, fullCmd]
-     */
-	private static function run_cmd( array $cmd_parts ): array {
-		$cmd  = implode( ' ', $cmd_parts );
-		$out  = '';
-		$err  = '';
-		$code = 1;
-
-		$disabled       = ini_get( 'disable_functions' );
-		$disabled_list  = is_string( $disabled ) && '' !== $disabled ? array_map( 'trim', explode( ',', $disabled ) ) : [];
-		$exec_available = function_exists( 'exec' ) && ! in_array( 'exec', $disabled_list, true );
-
-		if ( $exec_available ) {
-			$lines = [];
-			// Capture both stdout and stderr to lines.
-			// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.system_calls_exec
-			exec( $cmd . ' 2>&1', $lines, $code );
-			$out = implode( "\n", $lines );
-		} else {
-			$err = 'Unable to run command: exec() is disabled on this server.';
-		}
-
-		return [ $code, $out, $err, $cmd ];
-	}
-
-	/**
      * Run a PHPCompatibility scan via phpcs for the given plugins/paths.
      *
      * @param string $php_minor        Target PHP version (major.minor).
@@ -294,26 +214,7 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 	 * @return array{0:int,1:string,2:string,3:string}
 	 */
 	private static function phpcs_scan_paths( string $php_minor, bool $include_warnings, array $paths, array $extra_excludes ): array {
-		if ( self::cli_available() ) {
-			return self::run_cmd( self::build_phpcs_cmd( $php_minor, $include_warnings, $paths, $extra_excludes ) );
-		}
 		return self::run_phpcs_embedded( $php_minor, $include_warnings, $paths, $extra_excludes );
-	}
-
-	/**
-	 * Determine if CLI execution is available and phpcs binary exists.
-	 *
-	 * @return bool
-	 */
-	private static function cli_available(): bool {
-		$bin = self::find_phpcs_binary();
-		if ( ! file_exists( $bin ) ) {
-			return false;
-		}
-		$disabled      = ini_get( 'disable_functions' );
-		$disabled_list = is_string( $disabled ) && '' !== $disabled ? array_map( 'trim', explode( ',', $disabled ) ) : [];
-		$exec_ok       = function_exists( 'exec' ) && ! in_array( 'exec', $disabled_list, true );
-		return $exec_ok;
 	}
 
 	/**
@@ -904,7 +805,7 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 			'runtime'          => $runtime,
 			'target'           => $selected_target,
 			'include_warnings' => $include_warnings,
-			'engine'           => self::cli_available() ? 'cli' : 'embedded',
+			'engine'           => 'embedded',
 			'targets'          => $targets,
 			'extra_excludes'   => $extra_excludes,
 			'current_index'    => 0,
