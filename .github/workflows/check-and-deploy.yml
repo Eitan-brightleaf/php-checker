@@ -99,6 +99,9 @@ jobs:
           cp readme.txt build/
           cp -R vendor build/vendor
 
+      - name: Install Subversion
+        run: sudo apt-get update && sudo apt-get install -y subversion
+
       - name: Deploy to WordPress.org SVN
         env:
           SLUG: brightleaf-digital-php-compatibility-scanner
