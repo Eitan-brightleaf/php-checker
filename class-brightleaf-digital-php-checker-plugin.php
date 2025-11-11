@@ -257,13 +257,13 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 			$argv_backup     = $GLOBALS['argv'] ?? null;
 			$_argv_backup    = isset( $_SERVER['argv'] ) ? sanitize_text_field( wp_unslash( $_SERVER['argv'] ) ) : null;
 			$argv            = array_merge( [ 'phpcs' ], $args );
-			$GLOBALS['argv'] = $argv;
+			$GLOBALS['argv'] = $argv; // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedVariableFound
 			$_SERVER['argv'] = $argv;
 			$runner          = new Runner();
 			$runner->runPHPCS();
 			// Restore argv globals.
 			if ( null !== $argv_backup ) {
-				$GLOBALS['argv'] = $argv_backup;
+				$GLOBALS['argv'] = $argv_backup; // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedVariableFound
 			} else {
 				unset( $GLOBALS['argv'] ); }
 			if ( null !== $_argv_backup ) {
