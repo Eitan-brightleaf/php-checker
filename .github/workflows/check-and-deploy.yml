@@ -99,11 +99,130 @@ jobs:
           cp readme.txt build/
           cp -R vendor build/vendor
 
-      - name: WordPress Plugin Deploy
-        uses: 10up/action-wordpress-plugin-deploy@stable
+      - name: Deploy to WordPress.org SVN
         env:
           SLUG: brightleaf-digital-php-compatibility-scanner
           SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
           SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
           VERSION: ${{ needs.get_version.outputs.version }}
           BUILD_DIR: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Version to deploy: $VERSION"
+          if [[ ! -d "$BUILD_DIR" ]]; then
+            echo "Build directory '$BUILD_DIR' not found" >&2
+            exit 1
+          fi
+
+          # Validate readme Stable tag matches version
+          if [[ ! -f "$BUILD_DIR/readme.txt" ]]; then
+            echo "readme.txt not found in build dir" >&2
+            exit 1
+          fi
+          STABLE_TAG=$(awk -F': ' 'BEGIN{IGNORECASE=1} /^Stable tag:/ {print $2; exit}' "$BUILD_DIR/readme.txt" | tr -d '\r' )
+          if [[ -z "$STABLE_TAG" ]]; then
+            echo "Stable tag not set in build/readme.txt" >&2
+            exit 1
+          fi
+          if [[ "$STABLE_TAG" != "$VERSION" ]]; then
+            echo "Stable tag ($STABLE_TAG) does not match version ($VERSION)" >&2
+            exit 1
+          fi
+          echo "Stable tag matches: $STABLE_TAG"
+
+          # Prune vendor bloat within build dir to reduce commit size
+          if [[ -d "$BUILD_DIR/vendor" ]]; then
+            # Enable recursive globs; match nothing safely when absent
+            shopt -s globstar nullglob
+
+            # Generic heavy dev-only content across all packages
+            rm -rf "$BUILD_DIR"/vendor/**/[Tt]ests "$BUILD_DIR"/vendor/**/tests || true
+            rm -rf "$BUILD_DIR"/vendor/**/docs "$BUILD_DIR"/vendor/**/Docs || true
+            rm -rf "$BUILD_DIR"/vendor/**/.github "$BUILD_DIR"/vendor/**/.git || true
+            rm -rf "$BUILD_DIR"/vendor/**/.gitattributes "$BUILD_DIR"/vendor/**/.gitignore || true
+            rm -rf "$BUILD_DIR"/vendor/**/.editorconfig "$BUILD_DIR"/vendor/**/.phpcs* || true
+            rm -rf "$BUILD_DIR"/vendor/**/phpunit.xml* "$BUILD_DIR"/vendor/**/phpunit* || true
+            rm -rf "$BUILD_DIR"/vendor/**/examples "$BUILD_DIR"/vendor/**/example || true
+            rm -rf "$BUILD_DIR"/vendor/**/bin || true
+
+            # PHPCS: remove internal tests/docs and CLI binaries
+            rm -rf "$BUILD_DIR"/vendor/squizlabs/php_codesniffer/tests || true
+            rm -rf "$BUILD_DIR"/vendor/squizlabs/php_codesniffer/src/Standards/*/Tests || true
+            rm -rf "$BUILD_DIR"/vendor/squizlabs/php_codesniffer/src/Standards/*/Docs || true
+            rm -rf "$BUILD_DIR"/vendor/squizlabs/php_codesniffer/bin || true
+
+            # WPCS: remove unit tests and ancillary dev files (keep sniffs and rulesets)
+            rm -rf "$BUILD_DIR"/vendor/wp-coding-standards/wpcs/**/Tests || true
+            rm -rf "$BUILD_DIR"/vendor/wp-coding-standards/wpcs/**/.github || true
+            rm -rf "$BUILD_DIR"/vendor/wp-coding-standards/wpcs/**/Docs || true
+
+            # PHPCompatibility standards: remove tests and CI configs
+            rm -rf "$BUILD_DIR"/vendor/phpcompatibility/**/[Tt]ests || true
+            rm -rf "$BUILD_DIR"/vendor/phpcompatibility/**/.github || true
+
+            # PHPCSUtils / PHPCSExtra: remove tests and docs
+            rm -rf "$BUILD_DIR"/vendor/phpcsstandards/phpcsutils/**/[Tt]ests || true
+            rm -rf "$BUILD_DIR"/vendor/phpcsstandards/phpcsutils/**/docs "$BUILD_DIR"/vendor/phpcsstandards/phpcsutils/**/Docs || true
+            rm -rf "$BUILD_DIR"/vendor/phpcsstandards/phpcsextra/**/[Tt]ests || true
+            rm -rf "$BUILD_DIR"/vendor/phpcsstandards/phpcsextra/**/docs "$BUILD_DIR"/vendor/phpcsstandards/phpcsextra/**/Docs || true
+
+            # Composer installer plugin: remove tests
+            rm -rf "$BUILD_DIR"/vendor/dealerdirect/phpcodesniffer-composer-installer/**/[Tt]ests || true
+          fi
+
+          SVN_URL="https://plugins.svn.wordpress.org/$SLUG"
+          echo "Checking out SVN repo: $SVN_URL"
+          svn --version
+          svn co "$SVN_URL" wporg
+
+          echo "Syncing build to trunk"
+          rsync -rc --delete \
+            --exclude ".git" \
+            --exclude ".gitignore" \
+            --exclude ".github" \
+            --exclude ".DS_Store" \
+            --exclude "**/.git" \
+            --exclude "vendor/**/[Tt]ests" \
+            --exclude "vendor/**/tests" \
+            --exclude "vendor/**/Docs" \
+            --exclude "vendor/**/docs" \
+            --exclude "vendor/**/.github" \
+            --exclude "vendor/**/examples" \
+            --exclude "vendor/**/example" \
+            --exclude "vendor/**/bin" \
+            "$BUILD_DIR"/ wporg/trunk/
+
+          cd wporg
+          svn status
+          svn add --force trunk/* || true
+          MISSING=$(svn status | awk '/^!/ {print $2}')
+          if [[ -n "${MISSING:-}" ]]; then
+            svn rm --force $MISSING || true
+          fi
+          svn update
+
+          # Commit trunk with retry
+          attempts=0
+          until [ $attempts -ge 3 ]
+          do
+            if svn commit --username "$SVN_USERNAME" --password "$SVN_PASSWORD" --no-auth-cache -m "Release $VERSION"; then
+              echo "Commit succeeded"
+              break
+            fi
+            attempts=$((attempts+1))
+            echo "Commit failed, retrying in 20s... ($attempts/3)" >&2
+            sleep 20
+            svn update
+          done
+
+          # Tag via server-side copy if not exists
+          TAG_URL="$SVN_URL/tags/$VERSION"
+          if svn ls "$TAG_URL" > /dev/null 2>&1; then
+            echo "Tag $VERSION already exists at $TAG_URL. Skipping tag creation."
+          else
+            svn copy "$SVN_URL/trunk" "$TAG_URL" \
+              --username "$SVN_USERNAME" --password "$SVN_PASSWORD" --no-auth-cache \
+              -m "Tagging $VERSION"
+            echo "Tagged $VERSION"
+          fi
