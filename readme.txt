@@ -7,7 +7,7 @@ Stable tag: 1.0.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-This plugin scans your installed plugins and themes for potential PHP compatibility issues when upgrading to newer PHP versions using PHP_CodeSniffer with the PHPCompatibilityWP standard.
+This plugin scans your installed plugins and themes for potential PHP compatibility issues when upgrading to newer PHP versions.
 
 == Description ==
 
