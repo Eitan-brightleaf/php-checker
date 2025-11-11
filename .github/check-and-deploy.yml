@@ -1,0 +1,95 @@
+name: Check with PCP and maybe Deploy to WordPress.org
+on:
+  workflow_dispatch:
+  push:
+    paths-ignore:
+      - .github/**
+    branches:
+      - main
+jobs:
+  pcp:
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the repository
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Setup PHP
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+
+      # Run PCP check
+      - name: PCP
+        uses: wordpress/plugin-check-action@v1
+        with:
+          exclude-files: '.gitignore'
+  get_version:
+    needs: pcp
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      # Checkout the repository
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+
+      #Get the version from the tag
+      - name: Get version from tag
+        id: get_version
+        run: |
+          # Get the latest tag pointing to HEAD
+          TAG=$(git describe --tags --exact-match 2>/dev/null || echo "")
+          echo "Latest tag on HEAD: $TAG"
+          
+          # If no tag is found, skip deploy
+          if [ -z "$TAG" ]; then
+            echo "No tag on latest commit. Skipping deploy."
+            exit 0
+          fi
+          
+          # Remove leading 'v' from the tag (if present)
+          VERSION=${TAG#v}
+          echo "Stripped version: $VERSION"
+          
+          # Set output using the GITHUB_OUTPUT file
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+  maybe_deploy:
+    needs: get_version
+    if: ${{ needs.get_version.outputs.version && needs.get_version.outputs.version != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4\
+          
+        # Setup PHP
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer
+
+      # Install Dependencies (allow scripts to run for Strauss processing)
+      - name: Install dependencies
+        run: composer install --no-dev --no-progress --optimize-autoloader
+
+      - name: Prepare build directory
+        run: |
+          rm -rf build
+          mkdir -p build
+          cp -R assets build/assets
+          cp class-brightleaf-digital-php-checker-plugin.php build/
+          cp readme.txt build/
+          cp -R vendor build/vendor
+
+      - name: WordPress Plugin Deploy
+        uses: 10up/action-wordpress-plugin-deploy@stable
+        env:
+          SLUG: brightleaf-digital-php-compatibility-scanner
+          SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
+          VERSION: ${{ needs.get_version.outputs.version }}
+          BUILD_DIR: build
