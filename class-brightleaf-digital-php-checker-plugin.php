@@ -492,6 +492,10 @@ class BrightLeaf_Digital_Php_Checker_Plugin {
 		echo '<h1>PHP Compatibility Scanner</h1>';
 		echo '<p class="brightleaf-digital-php-checker-meta">Baseline: <code>' . esc_html( $runtime ) . '</code> (current runtime). Choose one target to compare against.</p>';
 
+		echo '<div class="notice notice-info" style="border-left-color: #00a0d2;">';
+		echo '<p>💡 <strong>Need more tools?</strong> Check out our other awesome plugins on <a href="https://brightleafdigital.io/" target="_blank" rel="noopener noreferrer">our website</a>!</p>';
+		echo '</div>';
+
 		echo '<form id="brightleaf-digital-php-checker-form" method="post">';
 		wp_nonce_field( 'brightleaf_digital_php_checker', 'brightleaf_digital_php_checker_nonce' );
 		echo '<table class="form-table"><tbody>';
