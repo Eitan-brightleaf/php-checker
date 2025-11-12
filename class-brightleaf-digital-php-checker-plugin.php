@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: BrightLeaf Digital PHP Compatibility Scanner
- * Author URI: https://digital.brightleaf.info/
+ * Author URI: https://brightleafdigital.io/
  * Description: Scan WordPress plugins for PHP compatibility issues between current PHP and newer versions. Shows inline results and stores scan summaries.
  * Version: 1.0.0
  * Author: BrightLeaf Digital
@@ -23,12 +23,12 @@ if ( ! defined( 'ABSPATH' ) ) {
  * Also stores a summary next to each plugin on the plugins list page.
  */
 class BrightLeaf_Digital_Php_Checker_Plugin {
-		const OPT_LAST_SCAN    = 'brightleaf_digital_php_checker_last_scan_results';
-		const TRANSIENT_PREFIX = 'brightleaf_digital_php_checker_job_';
-		const JOB_TTL          = 21600; // 6 hours
-		// Badges auto-expire after 30 days by default.
-		const BADGE_TTL            = 2592000; // 30 days
-		const PER_PLUGIN_MSG_LIMIT = 300; // cap stored messages per plugin for stability
+	const OPT_LAST_SCAN    = 'brightleaf_digital_php_checker_last_scan_results';
+	const TRANSIENT_PREFIX = 'brightleaf_digital_php_checker_job_';
+	const JOB_TTL          = 21600; // 6 hours
+	// Badges auto-expire after 30 days by default.
+	const BADGE_TTL            = 2592000; // 30 days
+	const PER_PLUGIN_MSG_LIMIT = 300; // cap stored messages per plugin for stability
 
 	/**
      * Hook WordPress actions/filters for the plugin lifecycle.
